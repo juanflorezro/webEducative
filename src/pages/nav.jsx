@@ -106,7 +106,7 @@ function Nav() {
                                                 </li>
                                                 <li className="nav-item">
                                                     <a className="nav-link" href="/about" onClick={() => setIsOpen(false)}>
-                                                        Sobre Nosotros
+                                                        Nosotros
                                                     </a>
                                                 </li>
                                             </ul>
