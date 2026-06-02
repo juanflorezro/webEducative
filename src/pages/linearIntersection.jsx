@@ -242,7 +242,7 @@ function AILog({ steps, onDone }) {
     <div style={s.logWrap}>
       <div style={s.logHeader}>
         <span style={s.dot1} /><span style={s.dot2} /><span style={s.dot3} />
-        <span style={s.logTitle}>solver.reduction</span>
+        <span style={s.logTitle}>Solución, Método de Reducción</span>
         {isTyping && <span style={s.pulseDot} />}
       </div>
       <div ref={bodyRef} style={s.logBody}>
