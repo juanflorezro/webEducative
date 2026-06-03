@@ -13,6 +13,8 @@ import Login from './pages/login'
 import Cursos from './pages/cursos'
 import About from './pages/about'
 import LinearIntersection from './pages/linearIntersection'
+import Examen from './pages/examen'
+import Admin from './pages/admin'
 
 
 function App() {
@@ -28,6 +30,8 @@ function App() {
                 <Route path="/login" element={<Login />} />
                 <Route path="/servicios" element={<Cursos />} />
                 <Route path="/about" element={<About />} />
+                <Route path="/examen" element={<Examen />} />
+                <Route path="/admin" element={<Admin />} />
                 <Route path="/calculofuncionlineal" element={<LinearIntersection />} />
               </Routes>
             </div>

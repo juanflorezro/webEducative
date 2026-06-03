@@ -68,7 +68,8 @@ function Cursos() {
                         {/* SERVICE 2 */}
                         <div className="col-md-4 col-sm-6">
 
-                            <div className="service_box">
+                            <div className="service_box" onClick={() => navigate("/examen")}
+        style={{ cursor: "pointer" }}>
 
                                 <img
                                     src="/images/service_icon2.png"

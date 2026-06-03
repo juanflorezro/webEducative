@@ -113,7 +113,7 @@ function Nav() {
 
                                             <ul className="sign" >
                                                 <li>
-                                                    <a className="sign_btn" href="/login" onClick={() => setIsOpen(false)} style={{marginBottom: "100px"}}>
+                                                    <a className="sign_btn" href="/admin" onClick={() => setIsOpen(false)} style={{marginBottom: "100px"}}>
                                                         Ingresar
                                                     </a>
                                                 </li>
