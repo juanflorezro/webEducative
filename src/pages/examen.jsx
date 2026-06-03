@@ -431,10 +431,18 @@ function LoginScreen({ onProfile }) {
   }
 
   return (
-    <div className="cx-login-wrapper" style={{ minHeight: "100vh", background: "linear-gradient(135deg, #0D47A1 0%, #1565C0 50%, #283593 100%)", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'Segoe UI', system-ui, sans-serif", padding: "1rem" }}>
+    <div className="cx-login-wrapper" style={{ minHeight: "100vh", background: `
+            radial-gradient(circle at top left, #1e3a8a 0%, transparent 30%),
+            radial-gradient(circle at bottom right, #2563eb 0%, transparent 30%),
+            #020617
+        `, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'Segoe UI', system-ui, sans-serif", padding: "1rem" }}>
       <div style={{ display: "flex", background: "#fff", borderRadius: 24, overflow: "hidden", maxWidth: 860, width: "100%", boxShadow: "0 30px 80px rgba(0,0,0,0.35)", minHeight: 480 }}>
         {/* Left panel */}
-        <div style={{ flex: 1, background: "linear-gradient(135deg, #1a237e, #283593)", color: "#fff", padding: "2.5rem", display: "flex", flexDirection: "column", justifyContent: "center", alignItems: "center", textAlign: "center", minWidth: 0 }} className="cx-login-left">
+        <div style={{ flex: 1, background: `
+            radial-gradient(circle at top left, #1e3a8a 0%, transparent 30%),
+            radial-gradient(circle at bottom right, #2563eb 0%, transparent 30%),
+            #020617
+        `, color: "#fff", padding: "2.5rem", display: "flex", flexDirection: "column", justifyContent: "center", alignItems: "center", textAlign: "center", minWidth: 0 }} className="cx-login-left">
           <div style={{ fontSize: 52, marginBottom: 16 }}>🧠</div>
           <h1 style={{ margin: "0 0 8px", fontSize: "clamp(1rem,3vw,1.3rem)", fontWeight: 800, letterSpacing: -0.5 }}>JAIME MELÉNDEZ SAMBRANO</h1>
           <div style={{ width: 40, height: 3, background: "#90CAF9", borderRadius: 2, margin: "10px auto" }} />
