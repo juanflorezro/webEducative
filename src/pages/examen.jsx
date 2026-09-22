@@ -56,6 +56,49 @@ const CAT_COLORS = {
 const STORAGE_KEY = "exam_socioemocional_v1";
 const USERS_KEY = "exam_users_v1";
 
+// ─────────────────────────────────────────────────────────────────────────
+// Google Sheets — envío de resultados
+// La URL viene de una variable de entorno de Vite. En Vercel se define en
+// Project Settings → Environment Variables como VITE_SHEETS_WEBHOOK_URL,
+// con el valor de tu URL "…/exec" de Google Apps Script.
+// En desarrollo local, ponla en un archivo .env.local en la raíz del repo:
+//   VITE_SHEETS_WEBHOOK_URL=https://script.google.com/macros/s/AKfycb.../exec
+// ─────────────────────────────────────────────────────────────────────────
+const SHEETS_WEBHOOK_URL = import.meta.env.VITE_SHEETS_WEBHOOK_URL || "";
+
+function buildCatStats(answers) {
+  const catStats = {};
+  QUESTIONS.forEach((q, i) => {
+    if (!catStats[q.cat]) catStats[q.cat] = { correct: 0, total: 0 };
+    catStats[q.cat].total++;
+    if (answers[i] === q.correct) catStats[q.cat].correct++;
+  });
+  return catStats;
+}
+
+// Envía (o actualiza) la fila del alumno en Google Sheets.
+// No bloquea la interfaz ni rompe el flujo si falla: es "mejor esfuerzo",
+// localStorage sigue siendo el respaldo inmediato en el navegador.
+function sendToSheet(payload) {
+  if (!SHEETS_WEBHOOK_URL) return; // sin URL configurada, no intenta nada
+  try {
+    fetch(SHEETS_WEBHOOK_URL, {
+      method: "POST",
+      // Apps Script no responde bien a preflight CORS con JSON estándar,
+      // por eso se usa text/plain: el script igual lo parsea con JSON.parse.
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+      body: JSON.stringify(payload),
+    }).catch(() => {
+      // Silencioso a propósito: si el alumno no tiene internet en ese
+      // instante, no queremos romper su examen. Los datos siguen
+      // guardados en localStorage y se podrán reenviar más adelante
+      // si se agrega lógica de reintento.
+    });
+  } catch {
+    // noop
+  }
+}
+
 function getStorage() {
   try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}"); } catch { return {}; }
 }
@@ -128,6 +171,23 @@ function RegistrationScreen({ onDone }) {
     const key = userKey(docType, docNum.trim());
     users[key] = { name: name.trim(), docType, docNum: docNum.trim(), registeredAt: Date.now() };
     setUsers(users);
+
+    // Registra en Sheets el inicio del examen (fila "En curso"), así queda
+    // constancia aunque el alumno nunca llegue a terminar.
+    sendToSheet({
+      estado: "Iniciado",
+      docType,
+      docNum: docNum.trim(),
+      nombre: name.trim(),
+      score: "",
+      total: QUESTIONS.length,
+      porcentaje: "",
+      nivel: "",
+      catStats: {},
+      timeLeft: EXAM_DURATION,
+      respuestasJSON: "",
+    });
+
     onDone({ docType, docNum: docNum.trim(), name: name.trim() });
   }
 
@@ -239,6 +299,26 @@ function ExamScreen({ user, onFinish }) {
     s[key] = { ...s[key], finished: true, answers: finalAnswers, score, total: QUESTIONS.length, finishedAt: Date.now() };
     setStorage(s);
     setFinished(true);
+
+    // Envía el resultado final a Google Sheets (actualiza la fila "Iniciado"
+    // que se creó al empezar, dejándola en estado "Finalizado").
+    const total = QUESTIONS.length;
+    const pct = Math.round((score / total) * 100);
+    const level = getLevel(pct);
+    sendToSheet({
+      estado: auto ? "Finalizado (tiempo agotado)" : "Finalizado",
+      docType: user.docType,
+      docNum: user.docNum,
+      nombre: user.name,
+      score,
+      total,
+      porcentaje: pct,
+      nivel: level.label,
+      catStats: buildCatStats(finalAnswers),
+      timeLeft: 0,
+      respuestasJSON: JSON.stringify(finalAnswers),
+    });
+
     onFinish({ score, answers: finalAnswers, name: user.name });
   }
 
@@ -346,12 +426,7 @@ function ResultsScreen({ score, answers, name, onGoLogin }) {
   const pct = Math.round((score / total) * 100);
   const level = getLevel(pct);
 
-  const catStats = {};
-  QUESTIONS.forEach((q, i) => {
-    if (!catStats[q.cat]) catStats[q.cat] = { correct: 0, total: 0 };
-    catStats[q.cat].total++;
-    if (answers[i] === q.correct) catStats[q.cat].correct++;
-  });
+  const catStats = buildCatStats(answers);
 
   const msgs = {
     "Excelente": "¡Felicitaciones! Demuestras un desarrollo socioemocional sobresaliente. Eres un ejemplo a seguir en convivencia y valores.",
@@ -488,12 +563,7 @@ function ProfileScreen({ userData, onBack }) {
   const level = getLevel(pct);
   const answers = userData.answers ?? [];
 
-  const catStats = {};
-  QUESTIONS.forEach((q, i) => {
-    if (!catStats[q.cat]) catStats[q.cat] = { correct: 0, total: 0 };
-    catStats[q.cat].total++;
-    if (answers[i] === q.correct) catStats[q.cat].correct++;
-  });
+  const catStats = buildCatStats(answers);
 
   const date = userData.finishedAt ? new Date(userData.finishedAt).toLocaleDateString("es-CO", { year: "numeric", month: "long", day: "numeric" }) : "—";
 
@@ -585,13 +655,6 @@ export default function Examen() {
   const [user, setUser] = useState(null);
   const [examResult, setExamResult] = useState(null);
   const [profileData, setProfileData] = useState(null);
-
-  // Check if in middle of exam on mount
-  useEffect(() => {
-    const storage = getStorage();
-    const users = getUsers();
-    // Nothing special on mount — user must verify
-  }, []);
 
   function handleRegDone({ docType, docNum, name, resuming, goLogin }) {
     if (goLogin) { setScreen("login"); return; }
