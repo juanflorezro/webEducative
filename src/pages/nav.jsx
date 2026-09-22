@@ -54,7 +54,7 @@ function Nav() {
 
                                 <div className="col-md-4 col-sm-4">
                                     <a className="logo" href="/">
-                                        <h5>JAIME MELÉNDEZ SAMBRANO</h5>
+                                        <h5>JAIME MELÉNDEZ ZAMBRANO</h5>
                                     </a>
                                 </div>
 

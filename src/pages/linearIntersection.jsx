@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef } from "react";
 
-/* ─── Chart.js CDN ─────────────────────────────────────────── */
-let chartInst = null;
+/* ══════════════════════════════════════════════════════════════
+   Chart.js CDN loader
+   ══════════════════════════════════════════════════════════════ */
 function useChartJS(cb) {
   useEffect(() => {
     if (window.Chart) { cb(); return; }
@@ -12,158 +13,368 @@ function useChartJS(cb) {
   }, []);
 }
 
-/* ─── Math ─────────────────────────────────────────────────── */
-const fmt = (n, d = 4) => parseFloat(n.toFixed(d));
-const frac = (n) => (Number.isInteger(n) ? `${n}` : fmt(n, 4).toString());
+/* ══════════════════════════════════════════════════════════════
+   Formato numérico y de ecuaciones
+   ══════════════════════════════════════════════════════════════ */
+const EPS = 1e-9;
 
-function solve(a1, b1, c1, a2, b2, c2) {
-  const det = a1 * b2 - a2 * b1;
-  if (det === 0) return a1 * c2 !== a2 * c1 ? { type: "none" } : { type: "infinite" };
-  return { type: "point", x: (c1 * b2 - c2 * b1) / det, y: (a1 * c2 - a2 * c1) / det };
+function fmtNum(n) {
+  if (Math.abs(n) < EPS) return "0";
+  const r = Math.round(n * 10000) / 10000;
+  if (Number.isInteger(r)) return String(r);
+  return r.toFixed(4).replace(/0+$/, "").replace(/\.$/, "");
 }
 
-function buildSteps(a1, b1, c1, a2, b2, c2, result) {
+function fmtEq(coefs, names, rhs) {
+  let out = "";
+  let any = false;
+  for (let i = 0; i < coefs.length; i++) {
+    const c = coefs[i];
+    if (Math.abs(c) < EPS) continue;
+    const abs = Math.abs(c);
+    const sign = c < 0 ? "−" : "+";
+    const mag = Math.abs(abs - 1) < EPS ? "" : fmtNum(abs);
+    if (!any) { out += (c < 0 ? "−" : "") + mag + names[i]; any = true; }
+    else out += ` ${sign} ${mag}${names[i]}`;
+  }
+  if (!any) out = "0";
+  return `${out} = ${fmtNum(rhs)}`;
+}
+
+// Expresión despejada, normalizada para que el denominador salga siempre positivo
+function fmtExpr(coefs, names, rhs, denom) {
+  const sgn = denom < 0 ? -1 : 1;
+  const dRhs = rhs * sgn, dDenom = denom * sgn;
+  let inner = fmtNum(dRhs);
+  for (let i = 0; i < coefs.length; i++) {
+    const c = coefs[i] * sgn;
+    if (Math.abs(c) < EPS) continue;
+    const sign = c < 0 ? "+" : "−";
+    const mag = Math.abs(Math.abs(c) - 1) < EPS ? "" : fmtNum(Math.abs(c));
+    inner += ` ${sign} ${mag}${names[i]}`;
+  }
+  const div = Math.abs(dDenom - 1) < EPS ? "" : ` / ${fmtNum(dDenom)}`;
+  return div ? `(${inner})${div}` : inner;
+}
+
+function rowOpText(rIdx, kIdx, factor) {
+  if (factor >= 0) return `F${rIdx} = F${rIdx} − (${fmtNum(factor)})·F${kIdx}`;
+  return `F${rIdx} = F${rIdx} + (${fmtNum(-factor)})·F${kIdx}`;
+}
+
+function getVarNames(n) {
+  if (n === 2) return ["x", "y"];
+  if (n === 3) return ["x", "y", "z"];
+  return ["x₁", "x₂", "x₃", "x₄"];
+}
+
+function isValidNum(str) {
+  const t = (str ?? "").trim();
+  if (t === "") return false;
+  return Number.isFinite(Number(t));
+}
+
+function defaultSystem(n) {
+  if (n === 2) return { matrix: [["2", "1"], ["1", "-1"]], consts: ["5", "1"] };
+  if (n === 3) return { matrix: [["2", "1", "-1"], ["-3", "-1", "2"], ["-2", "1", "2"]], consts: ["8", "-11", "-3"] };
+  return {
+    matrix: [["1", "1", "1", "1"], ["2", "1", "-1", "1"], ["1", "-2", "3", "-1"], ["-1", "1", "2", "-1"]],
+    consts: ["10", "5", "2", "3"],
+  };
+}
+
+function toRows(A, b) { return A.map((coeffs, i) => ({ coeffs: coeffs.slice(), rhs: b[i] })); }
+
+/* ══════════════════════════════════════════════════════════════
+   Solución de referencia — Gauss-Jordan con pivoteo parcial
+   Clasifica: unique | none | infinite
+   ══════════════════════════════════════════════════════════════ */
+function gaussSolve(A, b) {
+  const n = A.length;
+  const M = A.map((row, i) => [...row, b[i]]);
+  let rank = 0;
+  for (let col = 0; col < n && rank < n; col++) {
+    let piv = rank;
+    for (let r = rank + 1; r < n; r++) if (Math.abs(M[r][col]) > Math.abs(M[piv][col])) piv = r;
+    if (Math.abs(M[piv][col]) < EPS) continue;
+    [M[rank], M[piv]] = [M[piv], M[rank]];
+    for (let r = 0; r < n; r++) {
+      if (r === rank) continue;
+      const factor = M[r][col] / M[rank][col];
+      if (Math.abs(factor) < EPS) continue;
+      for (let c = col; c <= n; c++) M[r][c] -= factor * M[rank][c];
+    }
+    rank++;
+  }
+  for (let r = rank; r < n; r++) if (Math.abs(M[r][n]) > EPS) return { type: "none" };
+  if (rank < n) return { type: "infinite" };
+  const x = new Array(n).fill(0);
+  for (let i = 0; i < n; i++)
+    for (let c = 0; c < n; c++)
+      if (Math.abs(M[i][c]) > EPS) { x[c] = M[i][n] / M[i][c]; break; }
+  return { type: "unique", x };
+}
+
+/* ══════════════════════════════════════════════════════════════
+   MÉTODO 1 — REDUCCIÓN
+   Eliminación gaussiana hacia adelante (combinación lineal de
+   ecuaciones) + sustitución hacia atrás.
+   ══════════════════════════════════════════════════════════════ */
+function buildReduccion(A, b, names) {
+  const n = A.length;
+  const M = A.map((r) => r.slice());
+  const rhs = b.slice();
   const steps = [];
-  const bSign = (b) => (b >= 0 ? `+ ${b}` : `− ${Math.abs(b)}`);
+  steps.push({ label: "Sistema original", lines: M.map((row, i) => `Ec.${i + 1}:  ${fmtEq(row, names, rhs[i])}`) });
 
-  steps.push({
-    label: "📋 Sistema original",
-    lines: [
-      `Ecuación 1:   ${a1}x ${bSign(b1)}y = ${c1}`,
-      `Ecuación 2:   ${a2}x ${bSign(b2)}y = ${c2}`,
-    ],
-  });
-
-  const det = a1 * b2 - a2 * b1;
-
-  if (result.type === "none") {
-    steps.push({ label: "🔍 Análisis", lines: [`det = ${a1}·${b2} − ${a2}·${b1} = ${det}`, `det = 0 → pendientes iguales, interceptos distintos.`] });
-    steps.push({ label: "❌ Conclusión", lines: ["Sistema inconsistente. Sin solución."] });
-    return steps;
+  for (let k = 0; k < n; k++) {
+    let piv = k;
+    for (let r = k + 1; r < n; r++) if (Math.abs(M[r][k]) > Math.abs(M[piv][k])) piv = r;
+    if (Math.abs(M[piv][k]) < EPS) {
+      steps.push({ label: "Sistema singular", lines: [`No hay pivote disponible para ${names[k]} — este camino de reducción no continúa.`] });
+      return { steps, x: null, singular: true };
+    }
+    if (piv !== k) {
+      [M[k], M[piv]] = [M[piv], M[k]];
+      [rhs[k], rhs[piv]] = [rhs[piv], rhs[k]];
+      steps.push({ label: "Intercambio de filas", lines: [`F${k + 1} ↔ F${piv + 1}  (mayor pivote para ${names[k]})`] });
+    }
+    const lines = [];
+    for (let r = k + 1; r < n; r++) {
+      const factor = M[r][k] / M[k][k];
+      if (Math.abs(factor) < EPS) continue;
+      for (let c = k; c < n; c++) M[r][c] -= factor * M[k][c];
+      rhs[r] -= factor * rhs[k];
+      lines.push(`${rowOpText(r + 1, k + 1, factor)}  →  ${fmtEq(M[r], names, rhs[r])}`);
+    }
+    if (lines.length) steps.push({ label: `Eliminar ${names[k]}  (columna ${k + 1})`, lines });
   }
-  if (result.type === "infinite") {
-    steps.push({ label: "🔍 Análisis", lines: [`det = ${a1}·${b2} − ${a2}·${b1} = ${det}`, `det = 0 y ecuaciones proporcionales → misma recta.`] });
-    steps.push({ label: "∞ Conclusión", lines: ["Sistema dependiente. Infinitas soluciones."] });
-    return steps;
+
+  const x = new Array(n).fill(0);
+  const backLines = [];
+  for (let i = n - 1; i >= 0; i--) {
+    let sum = rhs[i];
+    for (let j = i + 1; j < n; j++) sum -= M[i][j] * x[j];
+    x[i] = sum / M[i][i];
+    backLines.push(`${names[i]} = ${fmtExpr(M[i].slice(i + 1), names.slice(i + 1), rhs[i], M[i][i])} = ${fmtNum(x[i])}`);
   }
-
-  const mA1 = a2, mA2 = a1;
-  const na1 = a1 * mA1, nb1 = b1 * mA1, nc1 = c1 * mA1;
-  const na2 = a2 * mA2, nb2 = b2 * mA2, nc2 = c2 * mA2;
-  const diffB = nb1 - nb2, diffC = nc1 - nc2;
-  const y = diffC / diffB;
-  const x = (c1 - b1 * y) / a1;
-
-  steps.push({
-    label: "⚙️  Paso 1 — Multiplicar para eliminar x",
-    lines: [
-      `Ec.1 × ${mA1}:   ${na1}x ${bSign(nb1)}y = ${nc1}`,
-      `Ec.2 × ${mA2}:   ${na2}x ${bSign(nb2)}y = ${nc2}`,
-    ],
-  });
-
-  steps.push({
-    label: "➖  Paso 2 — Restar ecuaciones",
-    lines: [
-      `(${nb1}) − (${nb2})  =  ${diffB}`,
-      `(${nc1}) − (${nc2})  =  ${diffC}`,
-      `${diffB}y = ${diffC}`,
-    ],
-  });
-
-  steps.push({
-    label: "🎯  Paso 3 — Despejar y",
-    lines: [`y = ${diffC} ÷ ${diffB}`, `y = ${frac(y)}`],
-  });
-
-  steps.push({
-    label: "🔄  Paso 4 — Sustituir en Ec.1",
-    lines: [
-      `${a1}x + (${b1})(${frac(y)}) = ${c1}`,
-      `${a1}x = ${c1} − ${frac(b1 * y)}`,
-      `${a1}x = ${frac(c1 - b1 * y)}`,
-      `x = ${frac(x)}`,
-    ],
-  });
-
-  steps.push({
-    label: "✅  Paso 5 — Verificación",
-    lines: [
-      `Ec.1: ${a1}(${frac(x)}) + ${b1}(${frac(y)}) = ${frac(a1 * x + b1 * y)}  ${Math.abs(a1 * x + b1 * y - c1) < 1e-9 ? "✓" : "✗"}`,
-      `Ec.2: ${a2}(${frac(x)}) + ${b2}(${frac(y)}) = ${frac(a2 * x + b2 * y)}  ${Math.abs(a2 * x + b2 * y - c2) < 1e-9 ? "✓" : "✗"}`,
-    ],
-  });
-
-  return steps;
+  steps.push({ label: "Sustitución hacia atrás", lines: backLines });
+  return { steps, x, singular: false };
 }
 
-/* ─── Chart ────────────────────────────────────────────────── */
-function renderChart(canvasRef, a1, b1, c1, a2, b2, c2, result) {
-  if (!canvasRef.current || !window.Chart) return;
-  const R = 12;
-  const xs = [];
-  for (let i = -R; i <= R; i += 0.2) xs.push(parseFloat(i.toFixed(1)));
-  const line = (a, b, c) => b === 0 ? null : xs.map((x) => ({ x, y: (c - a * x) / b }));
-  const d1 = line(a1, b1, c1), d2 = line(a2, b2, c2);
-  const gridC = "rgba(148,163,184,0.1)", axisC = "rgba(148,163,184,0.5)", tickC = "rgba(148,163,184,0.65)";
+/* ══════════════════════════════════════════════════════════════
+   MÉTODO 2 — SUSTITUCIÓN
+   Aísla una variable en una ecuación y la sustituye de inmediato
+   en TODAS las demás; recurre sobre el sistema más pequeño.
+   ══════════════════════════════════════════════════════════════ */
+function buildSustitucion(rows, varIdx, names) {
+  const m = rows.length;
+  if (m === 1) {
+    if (Math.abs(rows[0].coeffs[0]) < EPS) {
+      return { steps: [{ label: "Sistema singular", lines: [`No es posible aislar ${names[varIdx[0]]}: coeficiente 0.`] }], solution: null, singular: true };
+    }
+    const v = rows[0].rhs / rows[0].coeffs[0];
+    return {
+      steps: [{ label: "Última variable", lines: [`${names[varIdx[0]]} = ${fmtNum(rows[0].rhs)} / ${fmtNum(rows[0].coeffs[0])} = ${fmtNum(v)}`] }],
+      solution: { [varIdx[0]]: v }, singular: false,
+    };
+  }
+  let srcI = 0;
+  for (let i = 1; i < m; i++) if (Math.abs(rows[i].coeffs[0]) > Math.abs(rows[srcI].coeffs[0])) srcI = i;
+  const src = rows[srcI];
+  if (Math.abs(src.coeffs[0]) < EPS) {
+    return { steps: [{ label: "Sistema singular", lines: [`Ninguna ecuación permite aislar ${names[varIdx[0]]}.`] }], solution: null, singular: true };
+  }
+  const restNames = varIdx.slice(1).map((i) => names[i]);
+  const isolateLine = `Despejamos ${names[varIdx[0]]}:  ${names[varIdx[0]]} = ${fmtExpr(src.coeffs.slice(1), restNames, src.rhs, src.coeffs[0])}`;
 
+  const newRows = [];
+  const subLines = [];
+  for (let i = 0; i < m; i++) {
+    if (i === srcI) continue;
+    const o = rows[i];
+    const factor = o.coeffs[0] / src.coeffs[0];
+    const coeffs = [];
+    for (let j = 1; j < src.coeffs.length; j++) coeffs.push(o.coeffs[j] - factor * src.coeffs[j]);
+    const rhs = o.rhs - factor * src.rhs;
+    newRows.push({ coeffs, rhs });
+    subLines.push(`Sustituimos en otra ecuación  →  ${fmtEq(coeffs, restNames, rhs)}`);
+  }
+  const forwardStep = { label: `Aislar y sustituir ${names[varIdx[0]]}`, lines: [isolateLine, ...subLines] };
+  const inner = buildSustitucion(newRows, varIdx.slice(1), names);
+  if (inner.singular) return { steps: [forwardStep, ...inner.steps], solution: null, singular: true };
+
+  let sum = src.rhs;
+  for (let j = 1; j < src.coeffs.length; j++) sum -= src.coeffs[j] * inner.solution[varIdx[j]];
+  const v0 = sum / src.coeffs[0];
+  const backStep = { label: `Volver a ${names[varIdx[0]]}`, lines: [`${names[varIdx[0]]} = ${fmtExpr(src.coeffs.slice(1), restNames, src.rhs, src.coeffs[0])} = ${fmtNum(v0)}`] };
+  return { steps: [forwardStep, ...inner.steps, backStep], solution: { [varIdx[0]]: v0, ...inner.solution }, singular: false };
+}
+
+/* ══════════════════════════════════════════════════════════════
+   MÉTODO 3 — IGUALACIÓN
+   Aísla la MISMA variable en cada ecuación e iguala las
+   expresiones dos a dos; recurre sobre el sistema más pequeño.
+   ══════════════════════════════════════════════════════════════ */
+function buildIgualacion(rows, varIdx, names) {
+  const m = rows.length;
+  if (m === 1) {
+    if (Math.abs(rows[0].coeffs[0]) < EPS) {
+      return { steps: [{ label: "Sistema singular", lines: [`No es posible aislar ${names[varIdx[0]]}: coeficiente 0.`] }], solution: null, singular: true };
+    }
+    const v = rows[0].rhs / rows[0].coeffs[0];
+    return {
+      steps: [{ label: "Última variable", lines: [`${names[varIdx[0]]} = ${fmtNum(rows[0].rhs)} / ${fmtNum(rows[0].coeffs[0])} = ${fmtNum(v)}`] }],
+      solution: { [varIdx[0]]: v }, singular: false,
+    };
+  }
+  let refI = 0;
+  for (let i = 1; i < m; i++) if (Math.abs(rows[i].coeffs[0]) > Math.abs(rows[refI].coeffs[0])) refI = i;
+  const ref = rows[refI];
+  if (Math.abs(ref.coeffs[0]) < EPS) {
+    return { steps: [{ label: "Sistema singular", lines: [`Ninguna ecuación permite aislar ${names[varIdx[0]]}.`] }], solution: null, singular: true };
+  }
+  const restNames = varIdx.slice(1).map((i) => names[i]);
+  const lines = [`Despejamos ${names[varIdx[0]]} en cada ecuación:`];
+  const eqLabels = [];
+  for (let i = 0; i < m; i++) {
+    const label = String.fromCharCode(65 + i);
+    eqLabels.push(label);
+    const line = Math.abs(rows[i].coeffs[0]) < EPS
+      ? `  ${label})  (el coeficiente de ${names[varIdx[0]]} es 0 aquí — no se puede despejar)`
+      : `  ${label})  ${names[varIdx[0]]} = ${fmtExpr(rows[i].coeffs.slice(1), restNames, rows[i].rhs, rows[i].coeffs[0])}`;
+    lines.push(line);
+  }
+  lines.push("Igualamos las expresiones:");
+  const newRows = [];
+  for (let i = 0; i < m; i++) {
+    if (i === refI) continue;
+    const o = rows[i];
+    const coeffs = [];
+    for (let j = 1; j < ref.coeffs.length; j++) coeffs.push(ref.coeffs[0] * o.coeffs[j] - o.coeffs[0] * ref.coeffs[j]);
+    const rhs = ref.coeffs[0] * o.rhs - o.coeffs[0] * ref.rhs;
+    newRows.push({ coeffs, rhs });
+    lines.push(`  ${eqLabels[refI]} = ${eqLabels[i]}  →  ${fmtEq(coeffs, restNames, rhs)}`);
+  }
+  const forwardStep = { label: `Igualar expresiones de ${names[varIdx[0]]}`, lines };
+  const inner = buildIgualacion(newRows, varIdx.slice(1), names);
+  if (inner.singular) return { steps: [forwardStep, ...inner.steps], solution: null, singular: true };
+
+  let sum = ref.rhs;
+  for (let j = 1; j < ref.coeffs.length; j++) sum -= ref.coeffs[j] * inner.solution[varIdx[j]];
+  const v0 = sum / ref.coeffs[0];
+  const backStep = { label: `Volver a ${names[varIdx[0]]}`, lines: [`${names[varIdx[0]]} = ${fmtExpr(ref.coeffs.slice(1), restNames, ref.rhs, ref.coeffs[0])} = ${fmtNum(v0)}`] };
+  return { steps: [forwardStep, ...inner.steps, backStep], solution: { [varIdx[0]]: v0, ...inner.solution }, singular: false };
+}
+
+/* ══════════════════════════════════════════════════════════════
+   MÉTODO 4 — GRÁFICO
+   n = 2 → las dos rectas exactas.
+   n > 2 → corte 2D: se fijan las demás variables en el valor de
+   la solución y se grafican las rectas resultantes en el plano
+   de las dos variables elegidas (todas pasan por la solución).
+   ══════════════════════════════════════════════════════════════ */
+const LINE_COLORS = ["#f97316", "#38bdf8", "#22c55e", "#f472b6"];
+let sliceChartInst = null;
+
+function computeRange(lines, px, py) {
+  let R = 8;
+  const consider = (v) => { if (Number.isFinite(v)) R = Math.max(R, Math.abs(v)); };
+  consider(px); consider(py);
+  for (const { a, b, c } of lines) {
+    if (Math.abs(b) > EPS) consider(c / b);
+    if (Math.abs(a) > EPS) consider(c / a);
+  }
+  return Math.min(200, Math.ceil(R * 1.5));
+}
+
+function renderSliceChart(canvasRef, n, equations, pIdx, qIdx, fixedSolution, names) {
+  if (!canvasRef.current || !window.Chart) return;
+
+  const lines = equations.map((eq) => {
+    let c = eq.rhs;
+    for (let k = 0; k < n; k++) {
+      if (k === pIdx || k === qIdx) continue;
+      c -= eq.coeffs[k] * (fixedSolution ? fixedSolution[k] : 0);
+    }
+    return { a: eq.coeffs[pIdx], b: eq.coeffs[qIdx], c };
+  });
+
+  const solP = fixedSolution ? fixedSolution[pIdx] : undefined;
+  const solQ = fixedSolution ? fixedSolution[qIdx] : undefined;
+  const R = computeRange(lines, solP, solQ);
+  const xs = [];
+  for (let x = -R; x <= R; x += R / 60) xs.push(parseFloat(x.toFixed(3)));
+
+  const datasets = lines
+    .map(({ a, b, c }, i) => {
+      const color = LINE_COLORS[i % LINE_COLORS.length];
+      const dash = i >= 2 ? { borderDash: [7, 4] } : {};
+      if (Math.abs(b) < EPS) {
+        if (Math.abs(a) < EPS) return null; // esta ecuación no depende de ninguno de los dos ejes elegidos
+        const xConst = c / a;
+        return { label: `Ec.${i + 1}`, data: [{ x: xConst, y: -R }, { x: xConst, y: R }], borderColor: color, borderWidth: 2.5, pointRadius: 0, tension: 0, order: i + 1, ...dash };
+      }
+      const data = xs.map((x) => ({ x, y: (c - a * x) / b }));
+      return { label: `Ec.${i + 1}`, data, borderColor: color, borderWidth: 2.5, pointRadius: 0, tension: 0, order: i + 1, ...dash };
+    })
+    .filter(Boolean);
+
+  const ptDataset = fixedSolution ? [{
+    label: "Solución", data: [{ x: solP, y: solQ }], type: "scatter",
+    pointRadius: 9, pointHoverRadius: 11, pointBackgroundColor: "rgba(167,139,250,0.25)",
+    pointBorderColor: "#a78bfa", pointBorderWidth: 2.5, showLine: false, order: 0,
+  }] : [];
+
+  const gridC = "rgba(148,163,184,0.1)", axisC = "rgba(148,163,184,0.5)", tickC = "rgba(148,163,184,0.65)";
   const axisPlugin = {
     id: "axes",
     afterDraw(chart) {
-      const ctx = chart.ctx, xs = chart.scales.x, ys = chart.scales.y;
-      const x0 = xs.getPixelForValue(0), y0 = ys.getPixelForValue(0);
+      const ctx = chart.ctx, xsc = chart.scales.x, ysc = chart.scales.y;
+      const x0 = xsc.getPixelForValue(0), y0 = ysc.getPixelForValue(0);
       ctx.save(); ctx.strokeStyle = axisC; ctx.lineWidth = 2;
-      if (y0 >= ys.top && y0 <= ys.bottom) {
-        ctx.beginPath(); ctx.moveTo(xs.left, y0); ctx.lineTo(xs.right, y0); ctx.stroke();
-        ctx.fillStyle = tickC; ctx.font = "bold 11px monospace"; ctx.textAlign = "center"; ctx.fillText("x", xs.right + 10, y0 + 4);
+      if (y0 >= ysc.top && y0 <= ysc.bottom) {
+        ctx.beginPath(); ctx.moveTo(xsc.left, y0); ctx.lineTo(xsc.right, y0); ctx.stroke();
+        ctx.fillStyle = tickC; ctx.font = "bold 11px monospace"; ctx.textAlign = "center";
+        ctx.fillText(names[pIdx], xsc.right + 12, y0 + 4);
       }
-      if (x0 >= xs.left && x0 <= xs.right) {
-        ctx.beginPath(); ctx.moveTo(x0, ys.top); ctx.lineTo(x0, ys.bottom); ctx.stroke();
-        ctx.fillStyle = tickC; ctx.font = "bold 11px monospace"; ctx.textAlign = "left"; ctx.fillText("y", x0 + 4, ys.top - 6);
+      if (x0 >= xsc.left && x0 <= xsc.right) {
+        ctx.beginPath(); ctx.moveTo(x0, ysc.top); ctx.lineTo(x0, ysc.bottom); ctx.stroke();
+        ctx.fillStyle = tickC; ctx.font = "bold 11px monospace"; ctx.textAlign = "left";
+        ctx.fillText(names[qIdx], x0 + 4, ysc.top - 6);
       }
       ctx.restore();
     },
   };
 
-  const ptDataset = result?.type === "point" ? [{
-    label: "Intersección", data: [{ x: result.x, y: result.y }], type: "scatter",
-    pointRadius: 10, pointHoverRadius: 12,
-    pointBackgroundColor: "rgba(139,92,246,0.2)", pointBorderColor: "#a78bfa", pointBorderWidth: 2.5,
-    showLine: false, order: 0,
-  }] : [];
-
-  if (chartInst) { chartInst.destroy(); chartInst = null; }
-  chartInst = new window.Chart(canvasRef.current, {
+  if (sliceChartInst) { sliceChartInst.destroy(); sliceChartInst = null; }
+  sliceChartInst = new window.Chart(canvasRef.current, {
     type: "line", plugins: [axisPlugin],
-    data: {
-      datasets: [
-        ...(d1 ? [{ label: "Ec.1", data: d1, borderColor: "#f97316", borderWidth: 2.5, pointRadius: 0, tension: 0, order: 1 }] : []),
-        ...(d2 ? [{ label: "Ec.2", data: d2, borderColor: "#38bdf8", borderWidth: 2.5, pointRadius: 0, tension: 0, order: 2, borderDash: [7, 4] }] : []),
-        ...ptDataset,
-      ],
-    },
+    data: { datasets: [...datasets, ...ptDataset] },
     options: {
-      responsive: true, maintainAspectRatio: false, parsing: false, animation: { duration: 500 },
+      responsive: true, maintainAspectRatio: false, parsing: false, animation: { duration: 450 },
       plugins: {
         legend: { display: false },
-        tooltip: { backgroundColor: "rgba(2,6,23,0.92)", titleColor: "#94a3b8", bodyColor: "#e2e8f0", borderColor: "rgba(148,163,184,0.2)", borderWidth: 1, callbacks: { label: (c) => `(${fmt(c.raw.x, 2)}, ${fmt(c.raw.y, 2)})` } },
+        tooltip: { backgroundColor: "rgba(2,6,23,0.92)", titleColor: "#94a3b8", bodyColor: "#e2e8f0", borderColor: "rgba(148,163,184,0.2)", borderWidth: 1, callbacks: { label: (c) => `(${fmtNum(c.raw.x)}, ${fmtNum(c.raw.y)})` } },
       },
       scales: {
-        x: { type: "linear", min: -R, max: R, grid: { color: (c) => c.tick.value === 0 ? "transparent" : gridC }, border: { display: false }, ticks: { stepSize: 1, color: tickC, font: { size: 10, family: "monospace" }, autoSkip: false, maxTicksLimit: 25, callback: (v) => Number.isInteger(v) && v !== 0 ? v : "" } },
-        y: { type: "linear", min: -R, max: R, grid: { color: (c) => c.tick.value === 0 ? "transparent" : gridC }, border: { display: false }, ticks: { stepSize: 1, color: tickC, font: { size: 10, family: "monospace" }, autoSkip: false, maxTicksLimit: 25, callback: (v) => Number.isInteger(v) && v !== 0 ? v : "" } },
+        x: { type: "linear", min: -R, max: R, grid: { color: (c) => (c.tick.value === 0 ? "transparent" : gridC) }, border: { display: false }, ticks: { color: tickC, font: { size: 10, family: "monospace" }, maxTicksLimit: 12 } },
+        y: { type: "linear", min: -R, max: R, grid: { color: (c) => (c.tick.value === 0 ? "transparent" : gridC) }, border: { display: false }, ticks: { color: tickC, font: { size: 10, family: "monospace" }, maxTicksLimit: 12 } },
       },
     },
   });
 }
 
-/* ─── Typewriter hook ──────────────────────────────────────── */
+/* ══════════════════════════════════════════════════════════════
+   Typewriter — revela los pasos carácter por carácter
+   ══════════════════════════════════════════════════════════════ */
 function useTypewriter(steps, active, onDone) {
   const [rendered, setRendered] = useState([]);
   const timerRef = useRef(null);
   const doneRef = useRef(false);
 
   useEffect(() => {
-    if (!active || !steps.length) return;
+    if (!active || !steps || !steps.length) return;
     doneRef.current = false;
     setRendered([]);
     const pos = { si: 0, li: 0, ci: 0 };
@@ -172,10 +383,8 @@ function useTypewriter(steps, active, onDone) {
       if (doneRef.current) return;
       const step = steps[pos.si];
       if (!step) { doneRef.current = true; onDone(); return; }
+      const chars = [...(step.lines[pos.li] ?? "")];
 
-      const chars = [...(step.lines[pos.li] ?? "")]; // spread handles multibyte/emoji
-
-      // Ensure slot exists
       setRendered((prev) => {
         const next = [...prev];
         if (!next[pos.si]) next[pos.si] = { label: step.label, lines: [] };
@@ -186,7 +395,6 @@ function useTypewriter(steps, active, onDone) {
       });
 
       if (pos.ci < chars.length) {
-        // Write one character
         const si = pos.si, li = pos.li, ch = chars[pos.ci];
         setRendered((prev) => {
           const next = [...prev];
@@ -196,267 +404,351 @@ function useTypewriter(steps, active, onDone) {
           return next;
         });
         pos.ci++;
-        timerRef.current = setTimeout(advance, 18 + Math.random() * 20);
+        timerRef.current = setTimeout(advance, 8 + Math.random() * 10);
       } else {
-        // Line finished — move to next line or next step
-        pos.li++;
-        pos.ci = 0;
+        pos.li++; pos.ci = 0;
         if (pos.li >= step.lines.length) {
-          pos.li = 0;
-          pos.si++;
+          pos.li = 0; pos.si++;
           if (pos.si >= steps.length) { doneRef.current = true; onDone(); return; }
-          timerRef.current = setTimeout(advance, 320);
+          timerRef.current = setTimeout(advance, 220);
         } else {
-          timerRef.current = setTimeout(advance, 55);
+          timerRef.current = setTimeout(advance, 40);
         }
       }
     }
 
-    timerRef.current = setTimeout(advance, 250);
+    timerRef.current = setTimeout(advance, 150);
     return () => { clearTimeout(timerRef.current); doneRef.current = true; };
   }, [active, steps]);
 
   return rendered;
 }
 
-/* ─── AI Log ───────────────────────────────────────────────── */
-function AILog({ steps, onDone }) {
-  const [active, setActive] = useState(false);
+/* ══════════════════════════════════════════════════════════════
+   Panel de método (terminal con typewriter + resultado)
+   ══════════════════════════════════════════════════════════════ */
+function MethodPanel({ title, subtitle, accent, dot, steps, active, onDone, names, solution, singular, empty }) {
   const bodyRef = useRef(null);
+  const rendered = useTypewriter(steps, active, onDone || (() => {}));
 
-  useEffect(() => { setActive(true); }, []);
+  useEffect(() => { if (bodyRef.current) bodyRef.current.scrollTop = bodyRef.current.scrollHeight; }, [rendered]);
 
-  const rendered = useTypewriter(steps, active, onDone);
-
-  // Auto-scroll
-  useEffect(() => {
-    if (bodyRef.current) bodyRef.current.scrollTop = bodyRef.current.scrollHeight;
-  }, [rendered]);
-
-  // Blinking cursor visible while typing
-  const isTyping = rendered.length < steps.length ||
-    (rendered[steps.length - 1]?.lines?.join("").length <
-      steps[steps.length - 1]?.lines?.join("").length);
+  const isTyping = active && (rendered.length < (steps?.length || 0) ||
+    (rendered[(steps?.length || 1) - 1]?.lines?.join("").length < steps?.[steps.length - 1]?.lines?.join("").length));
 
   return (
-    <div style={s.logWrap}>
-      <div style={s.logHeader}>
-        <span style={s.dot1} /><span style={s.dot2} /><span style={s.dot3} />
-        <span style={s.logTitle}>Solución, Método de Reducción</span>
-        {isTyping && <span style={s.pulseDot} />}
+    <div style={s.quadCard}>
+      <div style={{ ...s.quadHeader, borderBottomColor: `${accent}33` }}>
+        <span style={{ ...s.quadDot, background: dot }} />
+        <div>
+          <div style={{ ...s.quadTitle, color: accent }}>{title}</div>
+          <div style={s.quadSubtitle}>{subtitle}</div>
+        </div>
+        {isTyping && <span style={{ ...s.pulseDot, background: accent }} />}
       </div>
-      <div ref={bodyRef} style={s.logBody}>
-        {rendered.map((step, si) => (
-          <div key={si} style={s.logStep}>
-            <div style={s.logStepLabel}>{step.label}</div>
-            {step.lines.map((line, li) => (
-              <div key={li} style={s.logLine}>
-                <span style={s.logPrompt}>›</span>
-                <span>{line}
-                  {/* cursor only on the last visible char of the last line of the last step */}
-                  {si === rendered.length - 1 && li === step.lines.length - 1 && isTyping && (
-                    <span style={s.cursor}>▍</span>
-                  )}
-                </span>
+
+      {empty ? (
+        <div style={s.quadEmpty}>Ingresa el sistema y presiona “Resolver sistema” para ver este método.</div>
+      ) : (
+        <>
+          <div ref={bodyRef} style={s.quadBody}>
+            {rendered.map((step, si) => (
+              <div key={si} style={s.logStep}>
+                <div style={{ ...s.logStepLabel, color: accent }}>{step.label}</div>
+                {step.lines.map((line, li) => (
+                  <div key={li} style={s.logLine}>
+                    <span style={{ ...s.logPrompt, color: accent }}>›</span>
+                    <span style={{ whiteSpace: "pre-wrap" }}>
+                      {line}
+                      {si === rendered.length - 1 && li === step.lines.length - 1 && isTyping && <span style={s.cursor}>▍</span>}
+                    </span>
+                  </div>
+                ))}
               </div>
             ))}
           </div>
-        ))}
-      </div>
+          {!isTyping && !singular && solution && (
+            <div style={{ ...s.quadResult, borderTopColor: `${accent}33` }}>
+              {names.map((nm, i) => (
+                <span key={i} style={s.quadResultChip}>
+                  <span style={{ color: accent }}>{nm}</span> = {fmtNum(solution[i])}
+                </span>
+              ))}
+            </div>
+          )}
+        </>
+      )}
     </div>
   );
 }
 
-/* ─── Coefficient input ─────────────────────────────────────── */
-function CoeffInput({ value, onChange, placeholder }) {
+/* ══════════════════════════════════════════════════════════════
+   Panel gráfico
+   ══════════════════════════════════════════════════════════════ */
+function GraphPanel({ n, names, equations, groundTruth, axisP, axisQ, setAxisP, setAxisQ, cjsReady, solved }) {
+  const canvasRef = useRef(null);
+  const accent = "#a78bfa";
+  const canPlot = solved && (n === 2 || groundTruth?.type === "unique");
+
+  useEffect(() => {
+    if (!canPlot || !cjsReady) return;
+    const t = setTimeout(() => renderSliceChart(canvasRef, n, equations, axisP, axisQ, groundTruth?.x || null, names), 60);
+    return () => clearTimeout(t);
+  }, [canPlot, cjsReady, axisP, axisQ, n, equations, groundTruth, names]);
+
+  const subtitle = n === 2 ? "Intersección de dos rectas" : `Corte 2D fijando las demás variables`;
+
   return (
-    <input type="number" value={value} onChange={(e) => onChange(e.target.value)}
-      placeholder={placeholder} step="any" style={s.coeff} />
+    <div style={s.quadCard}>
+      <div style={{ ...s.quadHeader, borderBottomColor: `${accent}33` }}>
+        <span style={{ ...s.quadDot, background: accent }} />
+        <div>
+          <div style={{ ...s.quadTitle, color: accent }}>Método gráfico</div>
+          <div style={s.quadSubtitle}>{subtitle}</div>
+        </div>
+      </div>
+
+      {n > 2 && (
+        <div style={s.axisRow}>
+          <label style={s.axisLabel}>
+            Eje horizontal
+            <select style={s.axisSelect} value={axisP} onChange={(e) => setAxisP(Number(e.target.value))}>
+              {names.map((nm, i) => i === axisQ ? null : <option key={i} value={i}>{nm}</option>)}
+            </select>
+          </label>
+          <label style={s.axisLabel}>
+            Eje vertical
+            <select style={s.axisSelect} value={axisQ} onChange={(e) => setAxisQ(Number(e.target.value))}>
+              {names.map((nm, i) => i === axisP ? null : <option key={i} value={i}>{nm}</option>)}
+            </select>
+          </label>
+        </div>
+      )}
+
+      {!solved ? (
+        <div style={s.quadEmpty}>Ingresa el sistema y presiona “Resolver sistema” para ver la gráfica.</div>
+      ) : !canPlot ? (
+        <div style={s.quadEmpty}>
+          El corte 2D necesita una solución única para fijar las demás variables. Este sistema es {groundTruth?.type === "none" ? "inconsistente (sin solución)." : "dependiente (infinitas soluciones)."}
+        </div>
+      ) : (
+        <>
+          <div style={s.legendRow}>
+            {equations.map((_, i) => (
+              <span key={i} style={s.legItem}>
+                <span style={{ ...s.legLine, background: LINE_COLORS[i % LINE_COLORS.length], ...(i >= 2 ? { background: "transparent", borderTop: `2.5px dashed ${LINE_COLORS[i % LINE_COLORS.length]}`, height: 0 } : {}) }} />
+                Ec.{i + 1}
+              </span>
+            ))}
+            {groundTruth?.x && <span style={s.legItem}><span style={s.legDot} />({fmtNum(groundTruth.x[axisP])}, {fmtNum(groundTruth.x[axisQ])})</span>}
+          </div>
+          <div style={s.chartWrap}>
+            <canvas ref={canvasRef} role="img" aria-label="Gráfica del sistema" />
+          </div>
+          {n > 2 && <p style={s.graphNote}>Todas las ecuaciones se evalúan fijando {names.filter((_, i) => i !== axisP && i !== axisQ).join(", ")} en el valor de la solución, así que las {equations.length} rectas de este corte se cruzan exactamente en ese punto.</p>}
+        </>
+      )}
+    </div>
   );
 }
 
-/* ─── Main ─────────────────────────────────────────────────── */
-export default function LinearSystem() {
-  const [a1, setA1] = useState("2");
-  const [b1, setB1] = useState("1");
-  const [c1, setC1] = useState("5");
-  const [a2, setA2] = useState("1");
-  const [b2, setB2] = useState("-1");
-  const [c2, setC2] = useState("1");
+/* ══════════════════════════════════════════════════════════════
+   Input de coeficiente
+   ══════════════════════════════════════════════════════════════ */
+function Cell({ value, onChange, placeholder, invalid, width }) {
+  return (
+    <input
+      type="text" inputMode="decimal" value={value} onChange={(e) => onChange(e.target.value)}
+      placeholder={placeholder}
+      style={{ ...s.coeff, width, ...(invalid ? s.coeffInvalid : null) }}
+    />
+  );
+}
 
-  const [phase, setPhase] = useState("idle"); // idle | logging | done
-  const [steps, setSteps] = useState([]);
-  const [result, setResult] = useState(null);
+/* ══════════════════════════════════════════════════════════════
+   Panel central — selector de tamaño + inputs + resumen
+   ══════════════════════════════════════════════════════════════ */
+function CenterPanel({ n, onSizeChange, matrix, consts, onCell, onConst, valid, onSolve, solved, groundTruth, names }) {
+  const inputW = n === 4 ? 44 : n === 3 ? 54 : 62;
+  const gap = n === 4 ? 6 : 8;
+
+  return (
+    <div style={s.centerWrap}>
+      <div style={s.headerRow}>
+        <div>
+          <h1 style={s.title}>Sistema de Ecuaciones Lineales</h1>
+          <p style={s.subtitle}>4 métodos de resolución, lado a lado</p>
+        </div>
+        <select style={s.sizeSelect} value={n} onChange={(e) => onSizeChange(Number(e.target.value))}>
+          <option value={2}>2 × 2</option>
+          <option value={3}>3 × 3</option>
+          <option value={4}>4 × 4</option>
+        </select>
+      </div>
+
+      <div style={s.card}>
+        <p style={s.cardLabel}>Coeficientes</p>
+        {matrix.map((row, i) => (
+          <div key={i} style={{ ...s.eqRow, marginBottom: i === n - 1 ? 0 : 10 }}>
+            <span style={s.eqTag}>Ec.{i + 1}</span>
+            <div style={{ ...s.eqInline, gap }}>
+              {row.map((val, j) => (
+                <span key={j} style={s.eqInline}>
+                  <Cell value={val} onChange={(v) => onCell(i, j, v)} placeholder={`a${j + 1}`} invalid={!isValidNum(val)} width={inputW} />
+                  <span style={{ ...s.varLabel, color: LINE_COLORS[j % LINE_COLORS.length] }}>{names[j]}</span>
+                  {j < n - 1 && <span style={s.op}>+</span>}
+                </span>
+              ))}
+              <span style={s.eqSign}>=</span>
+              <Cell value={consts[i]} onChange={(v) => onConst(i, v)} placeholder="k" invalid={!isValidNum(consts[i])} width={inputW} />
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <button onClick={onSolve} disabled={!valid} style={{ ...s.btn, opacity: !valid ? 0.45 : 1 }}>
+        Resolver sistema
+      </button>
+      {!valid && <p style={s.validHint}>Completa todos los coeficientes con números válidos.</p>}
+
+      {solved && groundTruth && (
+        <div style={s.summaryCard}>
+          {groundTruth.type === "unique" && (
+            <>
+              <span style={{ ...s.resBadge, ...s.badgePoint }}>✦ Solución única</span>
+              <div style={s.coordRow}>
+                {names.map((nm, i) => (
+                  <div key={i} style={s.coordBox}>
+                    <div style={s.coordLabel}>{nm}</div>
+                    <div style={s.coordVal}>{fmtNum(groundTruth.x[i])}</div>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+          {groundTruth.type === "none" && <span style={{ ...s.resBadge, ...s.badgeNone }}>✕ Sin solución — sistema inconsistente</span>}
+          {groundTruth.type === "infinite" && <span style={{ ...s.resBadge, ...s.badgeInf }}>∞ Infinitas soluciones — sistema dependiente</span>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════════════════════════
+   Componente principal
+   ══════════════════════════════════════════════════════════════ */
+export default function LinearSystemLab() {
+  const [n, setN] = useState(2);
+  const [matrix, setMatrix] = useState(defaultSystem(2).matrix);
+  const [consts, setConsts] = useState(defaultSystem(2).consts);
+  const [solved, setSolved] = useState(false);
+  const [groundTruth, setGroundTruth] = useState(null);
+  const [methodResults, setMethodResults] = useState(null);
+  const [axisP, setAxisP] = useState(0);
+  const [axisQ, setAxisQ] = useState(1);
   const [cjsReady, setCjsReady] = useState(false);
-  const canvasRef = useRef(null);
-
   useChartJS(() => setCjsReady(true));
 
-  const pa1 = parseFloat(a1), pb1 = parseFloat(b1), pc1 = parseFloat(c1);
-  const pa2 = parseFloat(a2), pb2 = parseFloat(b2), pc2 = parseFloat(c2);
-  const valid = [pa1, pb1, pc1, pa2, pb2, pc2].every((n) => !isNaN(n));
+  const names = getVarNames(n);
+  const valid = matrix.every((row) => row.every(isValidNum)) && consts.every(isValidNum);
 
-  function handleCalculate() {
+  function resetResults() { setSolved(false); setGroundTruth(null); setMethodResults(null); }
+
+  function handleSizeChange(newN) {
+    const d = defaultSystem(newN);
+    setN(newN); setMatrix(d.matrix); setConsts(d.consts);
+    setAxisP(0); setAxisQ(1);
+    resetResults();
+  }
+  function handleCell(i, j, v) {
+    setMatrix((prev) => prev.map((row, ri) => (ri === i ? row.map((c, ci) => (ci === j ? v : c)) : row)));
+    resetResults();
+  }
+  function handleConst(i, v) {
+    setConsts((prev) => prev.map((c, ci) => (ci === i ? v : c)));
+    resetResults();
+  }
+
+  function handleSolve() {
     if (!valid) return;
-    const res = solve(pa1, pb1, pc1, pa2, pb2, pc2);
-    setResult(res);
-    setSteps(buildSteps(pa1, pb1, pc1, pa2, pb2, pc2, res));
-    setPhase("logging");
+    const A = matrix.map((row) => row.map(Number));
+    const b = consts.map(Number);
+    const idx = Array.from({ length: n }, (_, i) => i);
+    const gt = gaussSolve(A, b);
+    const red = buildReduccion(A, b, names);
+    const sus = buildSustitucion(toRows(A, b), idx, names);
+    const igu = buildIgualacion(toRows(A, b), idx, names);
+    setGroundTruth(gt);
+    setMethodResults({ reduccion: red, sustitucion: sus, igualacion: igu });
+    setSolved(true);
   }
 
-  function handleLogDone() {
-    setPhase("done");
-    setTimeout(() => {
-      if (cjsReady) renderChart(canvasRef, pa1, pb1, pc1, pa2, pb2, pc2, result);
-    }, 120);
-  }
-
-  useEffect(() => {
-    if (phase === "done" && cjsReady)
-      renderChart(canvasRef, pa1, pb1, pc1, pa2, pb2, pc2, result);
-  }, [cjsReady, phase]);
-
-  const eqLabel = (a, b, c) => {
-    const bSign = b >= 0 ? `+ ${b}` : `− ${Math.abs(b)}`;
-    return `${a}x ${bSign}y = ${c}`;
-  };
+  const equations = matrix.map((row, i) => ({ coeffs: row.map(Number), rhs: Number(consts[i]) }));
 
   return (
     <div style={s.page}>
       <style>{`
         @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
         @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
-        @keyframes fadeUp { from{opacity:0;transform:translateY(10px)} to{opacity:1;transform:none} }
-        input[type=number]::-webkit-inner-spin-button,
-        input[type=number]::-webkit-outer-spin-button{-webkit-appearance:none}
-        input[type=number]{-moz-appearance:textfield}
-        input:focus{outline:none;border-color:rgba(56,189,248,.5)!important;box-shadow:0 0 0 2px rgba(56,189,248,.12)}
+        input[type=text]:focus, select:focus { outline:none; border-color:rgba(56,189,248,.5)!important; box-shadow:0 0 0 2px rgba(56,189,248,.12); }
+        select { font-family:'Courier New', monospace; }
+        .lsl-grid { display:grid; grid-template-columns: 1fr; gap:18px; grid-template-areas: "center" "tl" "tr" "bl" "br"; }
+        @media (min-width: 1000px) {
+          .lsl-grid { grid-template-columns: minmax(0,1fr) minmax(320px,440px) minmax(0,1fr); gap:22px; grid-template-areas: "tl center tr" "bl center br"; }
+        }
+        .lsl-tl { grid-area: tl; } .lsl-tr { grid-area: tr; } .lsl-bl { grid-area: bl; } .lsl-br { grid-area: br; } .lsl-center { grid-area: center; }
       `}</style>
 
       <div style={s.wrap}>
-        {/* Header */}
-        <div style={s.headerRow}>
-          <div>
-            <h1 style={s.title}>Sistema Lineal 2×2</h1>
-            <p style={s.subtitle}>Método de reducción — eliminación de Gauss</p>
+        <div className="lsl-grid">
+          <div className="lsl-center" style={s.centerCell}>
+            <CenterPanel
+              n={n} onSizeChange={handleSizeChange} matrix={matrix} consts={consts}
+              onCell={handleCell} onConst={handleConst} valid={valid} onSolve={handleSolve}
+              solved={solved} groundTruth={groundTruth} names={names}
+            />
           </div>
-          <div style={s.topBadge}>ax + by = k</div>
+
+          <div className="lsl-tl">
+            <MethodPanel
+              title="Sustitución" subtitle="Aísla una variable y sustituye" accent="#2dd4bf" dot="#2dd4bf"
+              steps={methodResults?.sustitucion.steps} active={solved} names={names}
+              solution={methodResults?.sustitucion.solution} singular={methodResults?.sustitucion.singular}
+              empty={!solved}
+            />
+          </div>
+          <div className="lsl-tr">
+            <MethodPanel
+              title="Igualación" subtitle="Iguala expresiones de la misma variable" accent="#fbbf24" dot="#fbbf24"
+              steps={methodResults?.igualacion.steps} active={solved} names={names}
+              solution={methodResults?.igualacion.solution} singular={methodResults?.igualacion.singular}
+              empty={!solved}
+            />
+          </div>
+          <div className="lsl-bl">
+            <MethodPanel
+              title="Reducción" subtitle="Elimina variables por combinación lineal" accent="#38bdf8" dot="#38bdf8"
+              steps={methodResults?.reduccion.steps} active={solved} names={names}
+              solution={methodResults?.reduccion.x} singular={methodResults?.reduccion.singular}
+              empty={!solved}
+            />
+          </div>
+          <div className="lsl-br">
+            <GraphPanel
+              n={n} names={names} equations={equations} groundTruth={groundTruth}
+              axisP={axisP} axisQ={axisQ} setAxisP={setAxisP} setAxisQ={setAxisQ}
+              cjsReady={cjsReady} solved={solved}
+            />
+          </div>
         </div>
-
-        {/* Inputs */}
-        <div style={s.card}>
-          <p style={s.cardLabel}>Coeficientes del sistema</p>
-          {[
-            { tag: "Ec. 1", a: a1, setA: setA1, b: b1, setB: setB1, c: c1, setC: setC1 },
-            { tag: "Ec. 2", a: a2, setA: setA2, b: b2, setB: setB2, c: c2, setC: setC2 },
-          ].map(({ tag, a, setA, b, setB, c, setC }, i) => (
-            <div key={i} style={{ ...s.eqRow, marginBottom: i === 0 ? 16 : 0 }}>
-              <span style={s.eqTag}>{tag}</span>
-              <div style={s.eqInline}>
-                <CoeffInput value={a} onChange={setA} placeholder="a" />
-                <span style={s.varX}>x</span>
-                <span style={s.op}>+</span>
-                <CoeffInput value={b} onChange={setB} placeholder="b" />
-                <span style={s.varY}>y</span>
-                <span style={s.eqSign}>=</span>
-                <CoeffInput value={c} onChange={setC} placeholder="k" />
-              </div>
-            </div>
-          ))}
-        </div>
-
-        <button onClick={handleCalculate} disabled={!valid || phase === "logging"}
-          style={{ ...s.btn, opacity: !valid || phase === "logging" ? 0.45 : 1 }}>
-          {phase === "logging" ? "Resolviendo…" : "Resolver sistema"}
-        </button>
-
-        {/* AI Log with typewriter */}
-        {(phase === "logging" || phase === "done") && steps.length > 0 && (
-          <AILog steps={steps} onDone={handleLogDone} />
-        )}
-
-        {/* Chart */}
-        {phase === "done" && (
-          <div style={{ marginTop: 20, animation: "fadeUp .5s ease both" }}>
-            <div style={s.legendRow}>
-              <span style={s.legItem}><span style={{ ...s.legLine, background: "#f97316" }} />{valid ? eqLabel(pa1, pb1, pc1) : "Ec. 1"}</span>
-              <span style={s.legItem}><span style={{ ...s.legLine, background: "transparent", borderTop: "2.5px dashed #38bdf8", height: 0 }} />{valid ? eqLabel(pa2, pb2, pc2) : "Ec. 2"}</span>
-              {result?.type === "point" && (
-                <span style={s.legItem}><span style={s.legDot} />({fmt(result.x, 3)}, {fmt(result.y, 3)})</span>
-              )}
-            </div>
-            <div style={s.chartWrap}>
-              <canvas ref={canvasRef} role="img" aria-label="Gráfica del sistema de ecuaciones" />
-            </div>
-          </div>
-        )}
-
-        {/* Result + Conclusions */}
-        {phase === "done" && result && (
-          <div style={{ ...s.resultCard, animation: "fadeUp .6s .1s ease both" }}>
-            {result.type === "point" && (
-              <>
-                <span style={{ ...s.resBadge, ...s.badgePoint }}>✦ Solución única</span>
-                <div style={s.coordRow}>
-                  <div style={s.coordBox}><div style={s.coordLabel}>x</div><div style={s.coordVal}>{frac(result.x)}</div></div>
-                  <div style={s.coordBox}><div style={s.coordLabel}>y</div><div style={s.coordVal}>{frac(result.y)}</div></div>
-                </div>
-                <div style={s.divider} />
-                <p style={s.concTitle}>Conclusiones</p>
-                <ul style={s.concList}>
-                  {[
-                    <>Sistema <strong style={s.hl}>consistente e independiente</strong>: exactamente una solución.</>,
-                    <>Las rectas se intersectan en <strong style={s.hl}>({frac(result.x)}, {frac(result.y)})</strong>.</>,
-                    <>El determinante es <strong style={s.hl}>det ≠ 0</strong>, lo que garantiza la unicidad.</>,
-                    <>El método de reducción eliminó <strong style={s.hl}>x</strong> multiplicando por coeficientes cruzados.</>,
-                  ].map((text, i) => (
-                    <li key={i} style={s.concItem}><span style={s.concNum}>0{i + 1}</span>{text}</li>
-                  ))}
-                </ul>
-              </>
-            )}
-            {result.type === "none" && (
-              <>
-                <span style={{ ...s.resBadge, ...s.badgeNone }}>✕ Sin solución</span>
-                <div style={s.divider} />
-                <p style={s.concTitle}>Conclusiones</p>
-                <ul style={s.concList}>
-                  {[
-                    <>Sistema <strong style={s.hl}>inconsistente</strong>: no tiene solución.</>,
-                    <>Las rectas son <strong style={s.hl}>paralelas</strong>: misma pendiente, distinto intercepto.</>,
-                    <>El determinante es <strong style={s.hl}>0</strong>: no existe solución única.</>,
-                    <>Geométricamente, las rectas <strong style={s.hl}>nunca se cruzan</strong>.</>,
-                  ].map((text, i) => (
-                    <li key={i} style={s.concItem}><span style={s.concNum}>0{i + 1}</span>{text}</li>
-                  ))}
-                </ul>
-              </>
-            )}
-            {result.type === "infinite" && (
-              <>
-                <span style={{ ...s.resBadge, ...s.badgeInf }}>∞ Infinitas soluciones</span>
-                <div style={s.divider} />
-                <p style={s.concTitle}>Conclusiones</p>
-                <ul style={s.concList}>
-                  {[
-                    <>Sistema <strong style={s.hl}>consistente y dependiente</strong>.</>,
-                    <>Ambas ecuaciones describen la <strong style={s.hl}>misma recta</strong>.</>,
-                    <>Cada punto de la recta es una <strong style={s.hl}>solución válida</strong>.</>,
-                    <>Los coeficientes de las ecuaciones son <strong style={s.hl}>proporcionales</strong>.</>,
-                  ].map((text, i) => (
-                    <li key={i} style={s.concItem}><span style={s.concNum}>0{i + 1}</span>{text}</li>
-                  ))}
-                </ul>
-              </>
-            )}
-          </div>
-        )}
       </div>
     </div>
   );
 }
 
-/* ─── Styles ───────────────────────────────────────────────── */
+/* ══════════════════════════════════════════════════════════════
+   Estilos
+   ══════════════════════════════════════════════════════════════ */
 const BG = `
   radial-gradient(circle at top left, #1e3a8a 0%, transparent 30%),
   radial-gradient(circle at bottom right, #2563eb 0%, transparent 30%),
@@ -465,62 +757,65 @@ const BG = `
 
 const s = {
   page: { minHeight: "100vh", background: BG, padding: "2rem 1rem", boxSizing: "border-box" },
-  wrap: { maxWidth: 660, margin: "0 auto", fontFamily: "'Courier New', monospace" },
+  wrap: { maxWidth: 1360, margin: "0 auto", fontFamily: "'Courier New', monospace" },
+  centerCell: { display: "flex", alignItems: "flex-start", justifyContent: "center" },
 
-  headerRow: { display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 28, flexWrap: "wrap", gap: 12 },
-  title: { fontSize: 22, fontWeight: 700, color: "#e2e8f0", letterSpacing: "-0.02em", margin: 0 },
-  subtitle: { fontSize: 12, color: "#475569", marginTop: 4, letterSpacing: "0.04em" },
-  topBadge: { fontSize: 13, color: "#38bdf8", border: "0.5px solid rgba(56,189,248,0.3)", borderRadius: 8, padding: "4px 14px", background: "rgba(56,189,248,0.08)", letterSpacing: "0.08em" },
+  /* Center panel */
+  centerWrap: { width: "100%", maxWidth: 440 },
+  headerRow: { display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 20, flexWrap: "wrap", gap: 10 },
+  title: { fontSize: 19, fontWeight: 700, color: "#e2e8f0", letterSpacing: "-0.02em", margin: 0, lineHeight: 1.25 },
+  subtitle: { fontSize: 11, color: "#475569", marginTop: 4, letterSpacing: "0.03em" },
+  sizeSelect: { fontSize: 13, color: "#93c5fd", border: "0.5px solid rgba(56,189,248,0.35)", borderRadius: 8, padding: "6px 10px", background: "rgba(56,189,248,0.08)", cursor: "pointer" },
 
-  card: { background: "rgba(255,255,255,0.04)", border: "0.5px solid rgba(148,163,184,0.15)", borderRadius: 14, padding: "20px 24px", marginBottom: 14 },
-  cardLabel: { fontSize: 10, color: "#475569", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 18 },
-  eqRow: { display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" },
-  eqTag: { fontSize: 10, color: "#475569", letterSpacing: "0.06em", minWidth: 36 },
-  eqInline: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" },
-  coeff: { width: 62, height: 40, textAlign: "center", fontFamily: "'Courier New', monospace", fontSize: 16, fontWeight: 600, background: "rgba(255,255,255,0.06)", border: "0.5px solid rgba(148,163,184,0.2)", borderRadius: 8, color: "#e2e8f0", boxSizing: "border-box" },
-  varX: { fontSize: 18, color: "#f97316", fontWeight: 700, fontStyle: "italic", minWidth: 12 },
-  varY: { fontSize: 18, color: "#38bdf8", fontWeight: 700, fontStyle: "italic", minWidth: 12 },
-  op: { fontSize: 16, color: "#475569" },
-  eqSign: { fontSize: 18, color: "#94a3b8", fontWeight: 300 },
+  card: { background: "rgba(255,255,255,0.04)", border: "0.5px solid rgba(148,163,184,0.15)", borderRadius: 14, padding: "18px 18px", marginBottom: 14 },
+  cardLabel: { fontSize: 10, color: "#475569", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 14 },
+  eqRow: { display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" },
+  eqTag: { fontSize: 10, color: "#475569", letterSpacing: "0.04em", minWidth: 30 },
+  eqInline: { display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" },
+  coeff: { height: 38, textAlign: "center", fontFamily: "'Courier New', monospace", fontSize: 14, fontWeight: 600, background: "rgba(255,255,255,0.06)", border: "0.5px solid rgba(148,163,184,0.2)", borderRadius: 8, color: "#e2e8f0", boxSizing: "border-box" },
+  coeffInvalid: { borderColor: "rgba(248,113,113,0.6)", background: "rgba(248,113,113,0.08)" },
+  varLabel: { fontSize: 15, fontWeight: 700, fontStyle: "italic" },
+  op: { fontSize: 14, color: "#475569" },
+  eqSign: { fontSize: 16, color: "#94a3b8", fontWeight: 300 },
 
-  btn: { width: "100%", height: 44, borderRadius: 10, cursor: "pointer", background: "rgba(37,99,235,0.18)", border: "0.5px solid rgba(37,99,235,0.5)", color: "#93c5fd", fontSize: 14, fontWeight: 600, letterSpacing: "0.04em", marginBottom: 20, transition: "background .2s", fontFamily: "'Courier New', monospace" },
+  btn: { width: "100%", height: 42, borderRadius: 10, cursor: "pointer", background: "rgba(37,99,235,0.18)", border: "0.5px solid rgba(37,99,235,0.5)", color: "#93c5fd", fontSize: 13, fontWeight: 600, letterSpacing: "0.04em", marginBottom: 6, fontFamily: "'Courier New', monospace" },
+  validHint: { fontSize: 11, color: "#fb923c", margin: "0 0 14px", textAlign: "center" },
 
-  /* Log */
-  logWrap: { background: "rgba(2,6,23,0.75)", border: "0.5px solid rgba(148,163,184,0.12)", borderRadius: 12, overflow: "hidden", marginBottom: 4 },
-  logHeader: { display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", background: "rgba(255,255,255,0.04)", borderBottom: "0.5px solid rgba(148,163,184,0.1)" },
-  dot1: { width: 10, height: 10, borderRadius: "50%", background: "#ef4444" },
-  dot2: { width: 10, height: 10, borderRadius: "50%", background: "#f59e0b" },
-  dot3: { width: 10, height: 10, borderRadius: "50%", background: "#22c55e" },
-  logTitle: { fontSize: 11, color: "#475569", marginLeft: 6, letterSpacing: "0.04em" },
-  pulseDot: { width: 7, height: 7, borderRadius: "50%", background: "#38bdf8", marginLeft: "auto", animation: "pulse 1s infinite" },
-  logBody: { padding: "14px 18px", maxHeight: 340, overflowY: "auto" },
-  logStep: { marginBottom: 16 },
-  logStepLabel: { fontSize: 11, color: "#38bdf8", letterSpacing: "0.06em", textTransform: "uppercase", marginBottom: 6 },
-  logLine: { fontSize: 13, color: "#94a3b8", lineHeight: 1.9, display: "flex", gap: 8 },
-  logPrompt: { color: "#2563eb", flexShrink: 0, userSelect: "none" },
-  cursor: { display: "inline-block", color: "#e2e8f0", animation: "blink 0.7s step-end infinite" },
-
-  /* Chart */
-  legendRow: { display: "flex", gap: 16, marginBottom: 10, flexWrap: "wrap" },
-  legItem: { display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "#64748b" },
-  legLine: { width: 18, height: 2.5, borderRadius: 2, display: "inline-block" },
-  legDot: { width: 10, height: 10, borderRadius: "50%", border: "2px solid #a78bfa", background: "rgba(139,92,246,0.2)", display: "inline-block" },
-  chartWrap: { width: "100%", height: 340, border: "0.5px solid rgba(148,163,184,0.12)", borderRadius: 12, overflow: "hidden", background: "rgba(2,6,23,0.55)" },
-
-  /* Result */
-  resultCard: { background: "rgba(255,255,255,0.04)", border: "0.5px solid rgba(148,163,184,0.15)", borderRadius: 14, padding: "20px 24px", marginTop: 16 },
-  resBadge: { display: "inline-block", fontSize: 12, fontWeight: 600, padding: "3px 14px", borderRadius: 20, marginBottom: 16, letterSpacing: "0.04em" },
+  summaryCard: { background: "rgba(255,255,255,0.04)", border: "0.5px solid rgba(148,163,184,0.15)", borderRadius: 14, padding: "16px 18px", marginTop: 10 },
+  resBadge: { display: "inline-block", fontSize: 12, fontWeight: 600, padding: "3px 14px", borderRadius: 20, marginBottom: 12, letterSpacing: "0.03em" },
   badgePoint: { background: "rgba(139,92,246,0.15)", color: "#a78bfa", border: "0.5px solid rgba(139,92,246,0.3)" },
   badgeNone: { background: "rgba(249,115,22,0.12)", color: "#fb923c", border: "0.5px solid rgba(249,115,22,0.3)" },
   badgeInf: { background: "rgba(56,189,248,0.1)", color: "#38bdf8", border: "0.5px solid rgba(56,189,248,0.25)" },
-  coordRow: { display: "flex", gap: 14, marginBottom: 18, flexWrap: "wrap" },
-  coordBox: { background: "rgba(255,255,255,0.05)", border: "0.5px solid rgba(148,163,184,0.15)", borderRadius: 10, padding: "10px 20px", minWidth: 90, textAlign: "center" },
-  coordLabel: { fontSize: 11, color: "#475569", marginBottom: 4, letterSpacing: "0.06em" },
-  coordVal: { fontSize: 28, fontWeight: 700, color: "#a78bfa" },
-  divider: { height: "0.5px", background: "rgba(148,163,184,0.1)", margin: "4px 0 16px" },
-  concTitle: { fontSize: 10, color: "#475569", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 12 },
-  concList: { listStyle: "none", padding: 0, display: "flex", flexDirection: "column", gap: 10 },
-  concItem: { display: "flex", gap: 14, alignItems: "flex-start", fontSize: 13, color: "#94a3b8", lineHeight: 1.65 },
-  concNum: { fontSize: 10, color: "#2563eb", fontWeight: 700, letterSpacing: "0.04em", minWidth: 22, paddingTop: 2 },
-  hl: { color: "#e2e8f0", fontWeight: 600 },
+  coordRow: { display: "flex", gap: 10, flexWrap: "wrap" },
+  coordBox: { background: "rgba(255,255,255,0.05)", border: "0.5px solid rgba(148,163,184,0.15)", borderRadius: 10, padding: "8px 14px", minWidth: 64, textAlign: "center" },
+  coordLabel: { fontSize: 10, color: "#475569", marginBottom: 2 },
+  coordVal: { fontSize: 18, fontWeight: 700, color: "#a78bfa" },
+
+  /* Quadrant cards */
+  quadCard: { background: "rgba(2,6,23,0.55)", border: "0.5px solid rgba(148,163,184,0.14)", borderRadius: 14, overflow: "hidden", height: "100%", minHeight: 260, display: "flex", flexDirection: "column" },
+  quadHeader: { display: "flex", alignItems: "center", gap: 10, padding: "12px 16px", background: "rgba(255,255,255,0.03)", borderBottom: "0.5px solid" },
+  quadDot: { width: 8, height: 8, borderRadius: "50%", flexShrink: 0 },
+  quadTitle: { fontSize: 13, fontWeight: 700, letterSpacing: "0.02em" },
+  quadSubtitle: { fontSize: 10, color: "#475569", marginTop: 1 },
+  pulseDot: { width: 6, height: 6, borderRadius: "50%", marginLeft: "auto", animation: "pulse 1s infinite" },
+  quadEmpty: { padding: "24px 18px", fontSize: 12, color: "#475569", lineHeight: 1.6, flex: 1, display: "flex", alignItems: "center" },
+  quadBody: { padding: "14px 16px", overflowY: "auto", flex: 1, maxHeight: 320 },
+  logStep: { marginBottom: 14 },
+  logStepLabel: { fontSize: 10, letterSpacing: "0.05em", textTransform: "uppercase", marginBottom: 5 },
+  logLine: { fontSize: 12, color: "#94a3b8", lineHeight: 1.75, display: "flex", gap: 7 },
+  logPrompt: { flexShrink: 0, userSelect: "none" },
+  cursor: { display: "inline-block", color: "#e2e8f0", animation: "blink 0.7s step-end infinite" },
+  quadResult: { display: "flex", flexWrap: "wrap", gap: "6px 14px", padding: "10px 16px", borderTop: "0.5px solid" },
+  quadResultChip: { fontSize: 12, color: "#e2e8f0", fontWeight: 600 },
+
+  /* Graph panel extras */
+  axisRow: { display: "flex", gap: 10, padding: "10px 16px 0" },
+  axisLabel: { fontSize: 10, color: "#475569", display: "flex", flexDirection: "column", gap: 4, flex: 1 },
+  axisSelect: { fontSize: 12, color: "#e2e8f0", background: "rgba(255,255,255,0.06)", border: "0.5px solid rgba(148,163,184,0.2)", borderRadius: 7, padding: "5px 6px" },
+  legendRow: { display: "flex", gap: 12, padding: "10px 16px 0", flexWrap: "wrap" },
+  legItem: { display: "flex", alignItems: "center", gap: 5, fontSize: 10, color: "#64748b" },
+  legLine: { width: 16, height: 2.5, borderRadius: 2, display: "inline-block" },
+  legDot: { width: 9, height: 9, borderRadius: "50%", border: "2px solid #a78bfa", background: "rgba(139,92,246,0.2)", display: "inline-block" },
+  chartWrap: { margin: "8px 16px 4px", height: 240, border: "0.5px solid rgba(148,163,184,0.12)", borderRadius: 10, overflow: "hidden", background: "rgba(2,6,23,0.4)" },
+  graphNote: { fontSize: 10, color: "#475569", lineHeight: 1.6, padding: "0 16px 14px", margin: 0 },
 };

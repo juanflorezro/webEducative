@@ -27,7 +27,7 @@ function About() {
 
                                         <br />
 
-                                        JAIME MELENDEZ SAMBRANO
+                                        JAIME MELENDEZ ZAMBRANO
                                     </h2>
 
                                 </div>

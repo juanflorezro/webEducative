@@ -142,7 +142,7 @@ function RegistrationScreen({ onDone }) {
         <div style={{ textAlign: "center", marginBottom: "2rem", color: "#fff" }}>
           <div style={{ fontSize: 48, marginBottom: 8 }}>🧠</div>
           <h1 style={{ margin: 0, fontSize: "clamp(1.2rem,4vw,1.6rem)", fontWeight: 700, letterSpacing: -0.5 }}>Diagnóstico Socioemocional</h1>
-          <p style={{ margin: "6px 0 0", opacity: 0.8, fontSize: 14 }}>Jaime Meléndez Sambrano · Curso 9°-03</p>
+          <p style={{ margin: "6px 0 0", opacity: 0.8, fontSize: 14 }}>Jaime Meléndez Zambrano · Curso 9°-03</p>
         </div>
 
         <div style={{ background: "#fff", borderRadius: 20, padding: "2rem", boxShadow: "0 20px 60px rgba(0,0,0,0.3)" }}>
@@ -444,7 +444,7 @@ function LoginScreen({ onProfile }) {
             #020617
         `, color: "#fff", padding: "2.5rem", display: "flex", flexDirection: "column", justifyContent: "center", alignItems: "center", textAlign: "center", minWidth: 0 }} className="cx-login-left">
           <div style={{ fontSize: 52, marginBottom: 16 }}>🧠</div>
-          <h1 style={{ margin: "0 0 8px", fontSize: "clamp(1rem,3vw,1.3rem)", fontWeight: 800, letterSpacing: -0.5 }}>JAIME MELÉNDEZ SAMBRANO</h1>
+          <h1 style={{ margin: "0 0 8px", fontSize: "clamp(1rem,3vw,1.3rem)", fontWeight: 800, letterSpacing: -0.5 }}>JAIME MELÉNDEZ ZAMBRANO</h1>
           <div style={{ width: 40, height: 3, background: "#90CAF9", borderRadius: 2, margin: "10px auto" }} />
           <p style={{ margin: 0, opacity: 0.85, fontSize: "clamp(12px,2.5vw,14px)", lineHeight: 1.6 }}>Bienvenido a un espacio dedicado al conocimiento, la investigación y el desarrollo integral de estudiantes comprometidos con la excelencia.</p>
         </div>

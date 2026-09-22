@@ -10,7 +10,7 @@ function Login() {
                 <div className="cx-login-left" style={{textAlign: "center"}}>
 
                     <div className="cx-login-brand">
-                        <h1>JAIME MELENDEZ SAMBRANO</h1>
+                        <h1>JAIME MELENDEZ zAMBRANO</h1>
                         <span></span>
                     </div>
 
