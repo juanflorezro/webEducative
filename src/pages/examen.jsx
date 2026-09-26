@@ -99,6 +99,27 @@ function sendToSheet(payload) {
   }
 }
 
+// Variante que SÍ espera la respuesta — para action:"check", donde hay que
+// decidir qué pantalla mostrar antes de continuar (bloqueado / reanudar /
+// empezar de cero). Si Sheets no responde (sin internet, URL no
+// configurada), devuelve networkError:true para que quien llama decida
+// caer a localStorage como respaldo, en vez de tratarlo como "no existe".
+async function checkSheet(payload) {
+  if (!SHEETS_WEBHOOK_URL) {
+    return { ok: false, networkError: true };
+  }
+  try {
+    const res = await fetch(SHEETS_WEBHOOK_URL, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+      body: JSON.stringify(payload),
+    });
+    return await res.json();
+  } catch {
+    return { ok: false, networkError: true };
+  }
+}
+
 function getStorage() {
   try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}"); } catch { return {}; }
 }
@@ -141,35 +162,78 @@ function RegistrationScreen({ onDone }) {
   const [name, setName] = useState("");
   const [error, setError] = useState("");
   const [step, setStep] = useState(1); // 1=doc type, 2=doc num, 3=name if new
+  const [checking, setChecking] = useState(false);
 
-  function handleCheck() {
+  async function handleCheck() {
     if (!docType) { setError("Selecciona el tipo de documento"); return; }
     if (!docNum.trim()) { setError("Ingresa tu número de documento"); return; }
     setError("");
-    const users = getUsers();
-    const key = userKey(docType, docNum.trim());
-    const storage = getStorage();
-    if (users[key] && storage[key]?.finished) {
-      setError("⛔ Ya completaste esta prueba. Ve a 'Ver mis resultados' para revisarlos.");
-      return;
+    const trimmedNum = docNum.trim();
+    const key = userKey(docType, trimmedNum);
+
+    setChecking(true);
+    const res = await checkSheet({ action: "check", docType, docNum: trimmedNum });
+    setChecking(false);
+
+    if (res.ok && res.exists) {
+      // Sheets es la fuente de verdad: decide con lo que diga, sin importar
+      // qué haya (o no haya) en localStorage de este navegador.
+      if (res.finished) {
+        setError("⛔ Ya completaste esta prueba. Ve a 'Ver mis resultados' para revisarlos.");
+        return;
+      }
+      if (res.started) {
+        // Reanuda con el progreso EXACTO que hay en Sheets — funciona
+        // aunque sea otro navegador/computador distinto al que empezó.
+        onDone({
+          docType, docNum: trimmedNum, name: res.name || "",
+          resuming: true,
+          resumeData: { current: res.current, answers: res.answers, timeLeft: res.timeLeft },
+        });
+        return;
+      }
+      if (res.name) {
+        // Ni finalizado ni "Iniciado" — típico justo después de que el
+        // admin resetea un examen: la fila sigue existiendo con el nombre
+        // preservado pero el estado quedó vacío. Se reaprovecha ese nombre
+        // en vez de pedirlo de nuevo, arrancando el registro igual que un
+        // alumno nuevo (deja constancia en Sheets del "Iniciado").
+        startExam(res.name);
+        return;
+      }
     }
-    if (users[key] && storage[key]?.started) {
-      // Resume
-      onDone({ docType, docNum: docNum.trim(), name: users[key].name, resuming: true });
-      return;
+
+    if (!res.ok && res.networkError) {
+      // Sin conexión con Sheets: se usa localStorage como respaldo, igual
+      // que hacía el código original — nunca al revés cuando Sheets sí
+      // contesta (evitaría el bloqueo si alguien simplemente desconecta
+      // el wifi para repetir el examen).
+      const users = getUsers();
+      const storage = getStorage();
+      if (users[key] && storage[key]?.finished) {
+        setError("⛔ Ya completaste esta prueba (según el registro local). Ve a 'Ver mis resultados' para revisarlos.");
+        return;
+      }
+      if (users[key] && storage[key]?.started) {
+        onDone({ docType, docNum: trimmedNum, name: users[key].name, resuming: true });
+        return;
+      }
+      if (users[key]) {
+        onDone({ docType, docNum: trimmedNum, name: users[key].name });
+        return;
+      }
     }
-    if (users[key]) {
-      onDone({ docType, docNum: docNum.trim(), name: users[key].name });
-      return;
-    }
+
+    // No existe en Sheets (res.exists === false) — o existe pero sin
+    // "started"/"finished" reales — y tampoco hay nada útil en caché: es un
+    // alumno nuevo, se le pide el nombre para registrarlo.
     setStep(3);
   }
 
-  function handleStart() {
-    if (!name.trim()) { setError("Ingresa tu nombre completo"); return; }
+  function startExam(nameToUse) {
     const users = getUsers();
     const key = userKey(docType, docNum.trim());
-    users[key] = { name: name.trim(), docType, docNum: docNum.trim(), registeredAt: Date.now() };
+    users[key] = { name: nameToUse.trim(), docType, docNum: docNum.trim(), registeredAt: Date.now() };
     setUsers(users);
 
     // Registra en Sheets el inicio del examen (fila "En curso"), así queda
@@ -178,7 +242,7 @@ function RegistrationScreen({ onDone }) {
       estado: "Iniciado",
       docType,
       docNum: docNum.trim(),
-      nombre: name.trim(),
+      nombre: nameToUse.trim(),
       score: "",
       total: QUESTIONS.length,
       porcentaje: "",
@@ -188,7 +252,12 @@ function RegistrationScreen({ onDone }) {
       respuestasJSON: "",
     });
 
-    onDone({ docType, docNum: docNum.trim(), name: name.trim() });
+    onDone({ docType, docNum: docNum.trim(), name: nameToUse.trim() });
+  }
+
+  function handleStart() {
+    if (!name.trim()) { setError("Ingresa tu nombre completo"); return; }
+    startExam(name);
   }
 
   return (
@@ -221,7 +290,7 @@ function RegistrationScreen({ onDone }) {
                 <input value={docNum} onChange={e => setDocNum(e.target.value)} onKeyDown={e => e.key === "Enter" && handleCheck()} placeholder="Ej: 1234567890" style={{ width: "100%", padding: "10px 12px", borderRadius: 10, border: "1.5px solid #ddd", fontSize: 14, boxSizing: "border-box" }} />
               </div>
               {error && <div style={{ background: "#FFEBEE", color: "#C62828", padding: "10px 14px", borderRadius: 10, fontSize: 13, marginBottom: 12 }}>{error}</div>}
-              <button onClick={handleCheck} style={{ width: "100%", padding: "13px", background: "#1565C0", color: "#fff", border: "none", borderRadius: 12, fontSize: 15, fontWeight: 700, cursor: "pointer" }}>Continuar →</button>
+              <button onClick={handleCheck} disabled={checking} style={{ width: "100%", padding: "13px", background: "#1565C0", color: "#fff", border: "none", borderRadius: 12, fontSize: 15, fontWeight: 700, cursor: checking ? "default" : "pointer", opacity: checking ? 0.7 : 1 }}>{checking ? "Verificando..." : "Continuar →"}</button>
             </>
           ) : (
             <>
@@ -249,21 +318,62 @@ function RegistrationScreen({ onDone }) {
 function ExamScreen({ user, onFinish }) {
   const key = userKey(user.docType, user.docNum);
   const storage = getStorage();
-  const saved = storage[key] || {};
+  const localSaved = storage[key] || {};
+  // user.resumeData viene de Sheets (fuente de verdad) cuando el alumno
+  // reanuda, incluso desde un navegador distinto al que empezó. Si no viene
+  // (examen nuevo, o Sheets no respondió y se cayó a localStorage en
+  // RegistrationScreen), se usa lo que haya en este navegador como antes.
+  const remoteSaved = user.resumeData || null;
 
-  const [current, setCurrent] = useState(saved.current ?? 0);
-  const [answers, setAnswers] = useState(saved.answers ?? new Array(QUESTIONS.length).fill(-1));
-  const [timeLeft, setTimeLeft] = useState(saved.timeLeft ?? EXAM_DURATION);
-  const [selected, setSelected] = useState(answers[saved.current ?? 0] ?? -1);
+  function normalizeAnswers(arr) {
+    const out = new Array(QUESTIONS.length).fill(-1);
+    if (Array.isArray(arr)) {
+      for (let i = 0; i < Math.min(arr.length, QUESTIONS.length); i++) {
+        if (typeof arr[i] === "number") out[i] = arr[i];
+      }
+    }
+    return out;
+  }
+
+  const initialCurrent = remoteSaved ? (remoteSaved.current ?? 0) : (localSaved.current ?? 0);
+  const initialAnswers = remoteSaved ? normalizeAnswers(remoteSaved.answers) : (localSaved.answers ?? new Array(QUESTIONS.length).fill(-1));
+  const initialTimeLeft = remoteSaved && remoteSaved.timeLeft != null ? remoteSaved.timeLeft : (localSaved.timeLeft ?? EXAM_DURATION);
+
+  const [current, setCurrent] = useState(initialCurrent);
+  const [answers, setAnswers] = useState(initialAnswers);
+  const [timeLeft, setTimeLeft] = useState(initialTimeLeft);
+  const [selected, setSelected] = useState(initialAnswers[initialCurrent] ?? -1);
   const [finished, setFinished] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
   const timerRef = useRef(null);
 
-  // Save state
+  // Save state — localStorage sigue siendo el respaldo instantáneo local.
   function save(cur, ans, tl) {
     const s = getStorage();
     s[key] = { ...s[key], current: cur, answers: ans, timeLeft: tl, started: true, name: user.name, docType: user.docType, docNum: user.docNum };
     setStorage(s);
+  }
+
+  // Sincroniza el progreso a Sheets — "mejor esfuerzo", no bloquea la UI.
+  // Esto es lo que permite reanudar exacto desde cualquier navegador: sin
+  // esto, cambiar de pregunta solo quedaría en el localStorage de esta
+  // sesión y Sheets seguiría mostrando el estado del último registro.
+  function syncProgress(cur, ans, tl) {
+    sendToSheet({
+      estado: "Iniciado",
+      docType: user.docType,
+      docNum: user.docNum,
+      nombre: user.name,
+      score: "",
+      total: QUESTIONS.length,
+      porcentaje: "",
+      nivel: "",
+      catStats: {},
+      timeLeft: tl,
+      respuestasJSON: "",
+      current: cur,
+      respuestasParcialesJSON: JSON.stringify(ans),
+    });
   }
 
   useEffect(() => {
@@ -286,6 +396,7 @@ function ExamScreen({ user, onFinish }) {
     newAnswers[current] = selected;
     setAnswers(newAnswers);
     save(idx, newAnswers, timeLeft);
+    syncProgress(idx, newAnswers, timeLeft);
     setCurrent(idx);
     setSelected(newAnswers[idx] ?? -1);
   }
@@ -495,14 +606,37 @@ function LoginScreen({ onProfile }) {
   const [docType, setDocType] = useState("");
   const [docNum, setDocNum] = useState("");
   const [error, setError] = useState("");
+  const [checking, setChecking] = useState(false);
 
-  function handleLogin() {
+  async function handleLogin() {
     if (!docType || !docNum.trim()) { setError("Completa todos los campos"); return; }
-    const users = getUsers();
-    const key = userKey(docType, docNum.trim());
-    const storage = getStorage();
-    if (!users[key] || !storage[key]) { setError("No encontramos esa identificación. ¿Ya realizaste la prueba?"); return; }
-    onProfile({ ...users[key], ...storage[key] });
+    setError("");
+    const trimmedNum = docNum.trim();
+
+    setChecking(true);
+    const res = await checkSheet({ action: "profile", docType, docNum: trimmedNum });
+    setChecking(false);
+
+    if (res.ok && res.exists) {
+      // Sheets es la fuente de verdad: funciona sin importar en qué
+      // navegador/dispositivo se hizo el examen originalmente.
+      onProfile(res.student);
+      return;
+    }
+
+    if (!res.ok) {
+      // Sin conexión con Sheets — se usa localStorage como respaldo, igual
+      // que en RegistrationScreen, solo si no se pudo ni siquiera preguntar.
+      const users = getUsers();
+      const key = userKey(docType, trimmedNum);
+      const storage = getStorage();
+      if (users[key] && storage[key]) {
+        onProfile({ ...users[key], ...storage[key] });
+        return;
+      }
+    }
+
+    setError("No encontramos esa identificación. ¿Ya realizaste la prueba?");
   }
 
   return (
@@ -544,7 +678,7 @@ function LoginScreen({ onProfile }) {
 
           {error && <div style={{ background: "#FFEBEE", color: "#C62828", padding: "10px 14px", borderRadius: 10, fontSize: 13, marginBottom: 14 }}>{error}</div>}
 
-          <button onClick={handleLogin} style={{ width: "100%", padding: "13px", background: "#1565C0", color: "#fff", border: "none", borderRadius: 12, fontSize: 15, fontWeight: 700, cursor: "pointer", marginBottom: 16 }}>Acceder a mis resultados →</button>
+          <button onClick={handleLogin} disabled={checking} style={{ width: "100%", padding: "13px", background: "#1565C0", color: "#fff", border: "none", borderRadius: 12, fontSize: 15, fontWeight: 700, cursor: checking ? "default" : "pointer", opacity: checking ? 0.7 : 1, marginBottom: 16 }}>{checking ? "Buscando..." : "Acceder a mis resultados →"}</button>
 
           <div style={{ textAlign: "center" }}>
             <button onClick={() => onProfile({ goExam: true })} style={{ background: "transparent", border: "none", color: "#1565C0", fontSize: 13, cursor: "pointer", textDecoration: "underline" }}>← Ir a realizar la prueba</button>
@@ -656,9 +790,9 @@ export default function Examen() {
   const [examResult, setExamResult] = useState(null);
   const [profileData, setProfileData] = useState(null);
 
-  function handleRegDone({ docType, docNum, name, resuming, goLogin }) {
+  function handleRegDone({ docType, docNum, name, resuming, resumeData, goLogin }) {
     if (goLogin) { setScreen("login"); return; }
-    setUser({ docType, docNum, name });
+    setUser({ docType, docNum, name, resumeData });
     setScreen("exam");
   }
 

@@ -1,9 +1,44 @@
 import { useState, useEffect } from "react";
- 
+
 const STORAGE_KEY = "exam_socioemocional_v1";
 const USERS_KEY   = "exam_users_v1";
-const ADMIN_PASS  = "admin2024";
- 
+// Caché local de lo último traído de Sheets — separado de STORAGE_KEY/USERS_KEY
+// (esos dos son los que usa Examen.jsx para el propio alumno en su navegador;
+// este es solo un respaldo de lectura para el panel admin).
+const ADMIN_CACHE_KEY = "exam_admin_cache_v1";
+
+// ─────────────────────────────────────────────────────────────────────────
+// Google Sheets — mismo webhook que usa Examen.jsx (VITE_SHEETS_WEBHOOK_URL).
+// La clave de administrador YA NO se compara aquí en el navegador: viaja en
+// el payload y la valida el propio Google Apps Script del lado del servidor
+// (ver ADMIN_PASSWORD en Code.gs). Así, aunque alguien lea este código
+// JavaScript, no puede listar/resetear/eliminar datos sin la clave real.
+// ─────────────────────────────────────────────────────────────────────────
+const SHEETS_WEBHOOK_URL = import.meta.env.VITE_SHEETS_WEBHOOK_URL || "";
+
+async function callSheets(payload) {
+  if (!SHEETS_WEBHOOK_URL) {
+    // Falta configuración, no es un rechazo del servidor — se marca como
+    // error de red para que quien llama pueda decidir usar el caché.
+    return { ok: false, networkError: true, error: "VITE_SHEETS_WEBHOOK_URL no está configurada." };
+  }
+  try {
+    const res = await fetch(SHEETS_WEBHOOK_URL, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+      body: JSON.stringify(payload),
+    });
+    // El servidor respondió (aunque sea con ok:false, ej. clave incorrecta):
+    // esto NO es un error de red, es un rechazo legítimo que debe respetarse
+    // tal cual — nunca se debe caer al caché por una clave equivocada.
+    return await res.json();
+  } catch (err) {
+    // Excepción real de fetch (sin internet, DNS, CORS, etc.) — aquí sí
+    // tiene sentido ofrecer el caché local como respaldo.
+    return { ok: false, networkError: true, error: "No se pudo conectar con Google Sheets: " + err.message };
+  }
+}
+
 const QUESTIONS = [
   {id:1,cat:"Convivencia Familiar",text:"Cuando tus padres te dan una opinión diferente a la tuya, ¿qué debes hacer?",opts:["Ignorarlos completamente","Discutir y enojarte","Escuchar respetuosamente","Hacer lo contrario"],correct:2},
   {id:2,cat:"Convivencia Familiar",text:"Tu hermano menor rompió accidentalmente tu celular.",opts:["Golpearlo","Gritarle y humillarlo","Hablar con calma y buscar solución","Contárselo a todos"],correct:2},
@@ -46,61 +81,45 @@ const QUESTIONS = [
   {id:39,cat:"Convivencia Escolar",text:"¿Cómo manejas conflictos con compañeros?",opts:["Con diálogo","Con golpes","Con chismes","Con venganza"],correct:0},
   {id:40,cat:"Convivencia Escolar",text:"¿Qué significa ser excelente estudiante?",opts:["Solo buenas notas","Ser responsable y respetuoso","Ser popular","Engañar profesores"],correct:1},
 ];
- 
+
 const CATS = ["Convivencia Familiar","Convivencia Social","Convivencia Escolar"];
 const CAT_COLOR = {"Convivencia Familiar":"#E65100","Convivencia Social":"#2E7D32","Convivencia Escolar":"#1565C0"};
 const CAT_BG    = {"Convivencia Familiar":"#FFF3E0","Convivencia Social":"#E8F5E9","Convivencia Escolar":"#E3F2FD"};
- 
+
 function getLevel(pct){
   if(pct>=85) return {label:"Excelente",color:"#2E7D32",bg:"#E8F5E9"};
   if(pct>=70) return {label:"Bueno",color:"#1565C0",bg:"#E3F2FD"};
   if(pct>=50) return {label:"Regular",color:"#E65100",bg:"#FFF3E0"};
   return {label:"Necesita mejorar",color:"#C62828",bg:"#FFEBEE"};
 }
- 
-function getData(){
-  try{
-    const users=JSON.parse(localStorage.getItem(USERS_KEY)||"{}");
-    const stor=JSON.parse(localStorage.getItem(STORAGE_KEY)||"{}");
-    return Object.entries(users).map(([key,user])=>{
-      const ex=stor[key]||{};
-      return {...user,...ex,key,pct:ex.score!=null?Math.round((ex.score/(ex.total||40))*100):null};
-    });
-  }catch{return [];}
+
+// Lee el caché local (respaldo instantáneo mientras llega la respuesta real
+// de Sheets, o si el fetch falla por falta de internet).
+function getCachedData(){
+  try{ return JSON.parse(localStorage.getItem(ADMIN_CACHE_KEY)||"[]"); }
+  catch{ return []; }
 }
- 
-function deleteUser(key){
-  try{
-    const u=JSON.parse(localStorage.getItem(USERS_KEY)||"{}");
-    const s=JSON.parse(localStorage.getItem(STORAGE_KEY)||"{}");
-    delete u[key]; delete s[key];
-    localStorage.setItem(USERS_KEY,JSON.stringify(u));
-    localStorage.setItem(STORAGE_KEY,JSON.stringify(s));
-  }catch{}
+function setCachedData(students){
+  try{ localStorage.setItem(ADMIN_CACHE_KEY, JSON.stringify(students)); }
+  catch{}
 }
- 
-function resetExam(key){
-  try{
-    const s=JSON.parse(localStorage.getItem(STORAGE_KEY)||"{}");
-    if(s[key]){s[key]={name:s[key].name,docType:s[key].docType,docNum:s[key].docNum};}
-    localStorage.setItem(STORAGE_KEY,JSON.stringify(s));
-  }catch{}
-}
- 
+
 function exportCSV(data){
   const rows=[["Nombre","Tipo Doc","Número","Puntaje","Total","Porcentaje","Nivel","Fecha","Familiar %","Social %","Escolar %"]];
   data.forEach(u=>{
     if(!u.finished)return;
-    const ans=u.answers||[];
-    const cs={};
-    CATS.forEach(c=>{cs[c]={co:0,to:0};});
-    QUESTIONS.forEach((q,i)=>{cs[q.cat].to++;if(ans[i]===q.correct)cs[q.cat].co++;});
+    const cs=u.catStats||{};
+    const pctOf=(cat,denom)=>{
+      const c=cs[cat];
+      if(!c||!c.total) return Math.round(((c&&c.correct)||0)/denom*100)+"%";
+      return Math.round((c.correct/c.total)*100)+"%";
+    };
     const lv=getLevel(u.pct||0);
     rows.push([u.name,u.docType,u.docNum,u.score,u.total||40,(u.pct||0)+"%",lv.label,
       u.finishedAt?new Date(u.finishedAt).toLocaleDateString("es-CO"):"",
-      Math.round((cs["Convivencia Familiar"].co/20)*100)+"%",
-      Math.round((cs["Convivencia Social"].co/10)*100)+"%",
-      Math.round((cs["Convivencia Escolar"].co/10)*100)+"%"]);
+      pctOf("Convivencia Familiar",20),
+      pctOf("Convivencia Social",10),
+      pctOf("Convivencia Escolar",10)]);
   });
   const csv=rows.map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(",")).join("\n");
   const blob=new Blob(["\uFEFF"+csv],{type:"text/csv;charset=utf-8;"});
@@ -108,10 +127,10 @@ function exportCSV(data){
   const a=document.createElement("a");a.href=url;a.download="resultados_socioemocional.csv";a.click();
   URL.revokeObjectURL(url);
 }
- 
+
 /* ── SHARED PRIMITIVES ─────────────────────────────────────────────────────── */
 const F = {fontFamily:"'Segoe UI',system-ui,sans-serif"};
- 
+
 function Bar({value,max,color}){
   const p=max>0?Math.round((value/max)*100):0;
   return(
@@ -123,11 +142,11 @@ function Bar({value,max,color}){
     </div>
   );
 }
- 
+
 function Chip({label,color,bg}){
   return <span style={{background:bg,color,padding:"3px 10px",borderRadius:20,fontSize:11,fontWeight:700,whiteSpace:"nowrap"}}>{label}</span>;
 }
- 
+
 function MetricCard({label,value,sub,color="#111"}){
   return(
     <div style={{background:"#F4F6F9",borderRadius:14,padding:"14px 16px"}}>
@@ -137,11 +156,45 @@ function MetricCard({label,value,sub,color="#111"}){
     </div>
   );
 }
- 
+
 /* ── ADMIN LOGIN ─────────────────────────────────────────────────────────── */
+// La contraseña YA NO se compara aquí: se manda al servidor (Google Apps
+// Script) junto con la primera petición de "list", y el servidor responde
+// ok:false si es incorrecta. Así la clave real nunca vive en el código que
+// cualquiera puede leer en el navegador.
 function AdminLogin({onLogin}){
   const [pass,setPass]=useState("");
   const [err,setErr]=useState("");
+  const [loading,setLoading]=useState(false);
+
+  async function attempt(){
+    if(!pass){ setErr("Ingresa la contraseña"); return; }
+    setErr(""); setLoading(true);
+    const res = await callSheets({ action: "list", adminPass: pass });
+    setLoading(false);
+    if(res.ok){
+      onLogin(pass, res.students || []);
+      return;
+    }
+    if(res.networkError){
+      // No hubo respuesta del servidor (no se pudo verificar la clave) —
+      // como respaldo, se puede seguir con el último dato guardado en este
+      // navegador. No es una validación de contraseña: solo evita que un
+      // corte de internet deje al profesor completamente sin acceso.
+      const cached = getCachedData();
+      if(cached.length){
+        setErr("Sin conexión con Sheets — entrando con datos guardados localmente (pueden no estar actualizados).");
+        setTimeout(()=>onLogin(pass, cached), 900);
+        return;
+      }
+      setErr(res.error || "No se pudo conectar con Google Sheets.");
+      return;
+    }
+    // Respuesta del servidor con ok:false y SIN networkError = la clave es
+    // incorrecta (el servidor sí llegó a validarla). Nunca se cae al caché.
+    setErr(res.error || "Contraseña incorrecta");
+  }
+
   return(
     <div style={{minHeight:"100vh",background:"#0D1B2A",display:"flex",alignItems:"center",justifyContent:"center",...F,padding:"1rem"}}>
       <div style={{background:"#fff",borderRadius:20,padding:"2.5rem",maxWidth:380,width:"100%"}}>
@@ -152,21 +205,21 @@ function AdminLogin({onLogin}){
         </div>
         <label style={{display:"block",fontSize:12,fontWeight:700,color:"#555",marginBottom:6}}>CONTRASEÑA</label>
         <input type="password" value={pass} onChange={e=>setPass(e.target.value)}
-          onKeyDown={e=>e.key==="Enter"&&(pass===ADMIN_PASS?onLogin():setErr("Contraseña incorrecta"))}
+          onKeyDown={e=>e.key==="Enter"&&!loading&&attempt()}
           placeholder="••••••••"
+          disabled={loading}
           style={{width:"100%",padding:"11px 14px",borderRadius:10,border:"1.5px solid #E0E0E0",fontSize:14,boxSizing:"border-box",marginBottom:10}}
           autoFocus/>
         {err&&<div style={{color:"#C62828",fontSize:13,marginBottom:8}}>⚠ {err}</div>}
-        <button onClick={()=>pass===ADMIN_PASS?onLogin():setErr("Contraseña incorrecta")}
-          style={{width:"100%",padding:13,background:"#0D1B2A",color:"#fff",border:"none",borderRadius:12,fontSize:15,fontWeight:700,cursor:"pointer"}}>
-          Ingresar →
+        <button onClick={attempt} disabled={loading}
+          style={{width:"100%",padding:13,background:"#0D1B2A",color:"#fff",border:"none",borderRadius:12,fontSize:15,fontWeight:700,cursor:loading?"default":"pointer",opacity:loading?0.7:1}}>
+          {loading?"Verificando...":"Ingresar →"}
         </button>
-        <p style={{textAlign:"center",marginTop:14,fontSize:12,color:"#bbb"}}> <code></code></p>
       </div>
     </div>
   );
 }
- 
+
 /* ── STUDENT DETAIL DRAWER (bottom-sheet style on mobile) ─────────────────── */
 function StudentDetail({user,onClose,onReset,onDelete}){
   const answers=user.answers||[];
@@ -174,7 +227,7 @@ function StudentDetail({user,onClose,onReset,onDelete}){
   CATS.forEach(c=>{catStats[c]={co:0,to:0};});
   QUESTIONS.forEach((q,i)=>{catStats[q.cat].to++;if(answers[i]===q.correct)catStats[q.cat].co++;});
   const lv=getLevel(user.pct||0);
- 
+
   return(
     <div style={{position:"fixed",inset:0,zIndex:300,display:"flex",alignItems:"flex-end",justifyContent:"center",background:"rgba(0,0,0,0.55)",...F}}
       onClick={e=>e.target===e.currentTarget&&onClose()}>
@@ -264,7 +317,7 @@ function StudentDetail({user,onClose,onReset,onDelete}){
     </div>
   );
 }
- 
+
 /* ── REPORT ──────────────────────────────────────────────────────────────── */
 function Report({data}){
   const finished=data.filter(u=>u.finished);
@@ -274,11 +327,11 @@ function Report({data}){
       <p style={{margin:0}}>Aún no hay estudiantes que hayan completado la prueba.</p>
     </div>
   );
- 
+
   const avg=Math.round(finished.reduce((s,u)=>s+(u.pct||0),0)/finished.length);
   const lvDist={"Excelente":0,"Bueno":0,"Regular":0,"Necesita mejorar":0};
   finished.forEach(u=>{lvDist[getLevel(u.pct||0).label]++;});
- 
+
   const catStats={};
   CATS.forEach(c=>{catStats[c]={co:0,to:0};});
   finished.forEach(u=>{
@@ -288,7 +341,7 @@ function Report({data}){
       if(a===q.correct)catStats[q.cat].co++;
     });
   });
- 
+
   const qStats=QUESTIONS.map((q,i)=>{
     let co=0,at=0;
     finished.forEach(u=>{
@@ -298,16 +351,16 @@ function Report({data}){
     });
     return{...q,co,at,pct:at>0?Math.round((co/at)*100):0};
   });
- 
+
   const hardest=[...qStats].sort((a,b)=>a.pct-b.pct).slice(0,5);
   const easiest=[...qStats].sort((a,b)=>b.pct-a.pct).slice(0,5);
- 
+
   const weakCat=Object.entries(catStats).sort((a,b)=>(a[1].co/a[1].to)-(b[1].co/b[1].to))[0];
   const weakPct=Math.round((weakCat[1].co/weakCat[1].to)*100);
- 
+
   const lvColor={"Excelente":"#2E7D32","Bueno":"#1565C0","Regular":"#E65100","Necesita mejorar":"#C62828"};
   const lvBg={"Excelente":"#E8F5E9","Bueno":"#E3F2FD","Regular":"#FFF3E0","Necesita mejorar":"#FFEBEE"};
- 
+
   const conclusions=[];
   if(avg>=85)conclusions.push({e:"🌟",t:`El grupo muestra nivel EXCELENTE (${avg}% promedio). La mayoría ha interiorizado valores socioemocionales sólidos.`});
   else if(avg>=70)conclusions.push({e:"✅",t:`El grupo tiene desempeño BUENO (${avg}% promedio). Existe base sólida con áreas de oportunidad.`});
@@ -317,7 +370,7 @@ function Report({data}){
   if(lvDist["Necesita mejorar"]>finished.length*0.3)conclusions.push({e:"👥",t:`El ${Math.round((lvDist["Necesita mejorar"]/finished.length)*100)}% necesita atención personalizada. Se sugiere acompañamiento de orientación escolar.`});
   if(lvDist["Excelente"]>finished.length*0.4)conclusions.push({e:"💡",t:`El ${Math.round((lvDist["Excelente"]/finished.length)*100)}% alcanzó Excelente. Pueden actuar como líderes socioemocionales del grupo.`});
   if(hardest[0].pct<40)conclusions.push({e:"📚",t:`Pregunta con más errores: "${hardest[0].text.substring(0,60)}…" (${hardest[0].pct}% aciertos). Indica dificultad en situaciones prácticas de convivencia.`});
- 
+
   return(
     <div>
       {/* KPIs */}
@@ -327,7 +380,7 @@ function Report({data}){
         <MetricCard label="Máximo" value={`${Math.max(...finished.map(u=>u.pct||0))}%`} color="#2E7D32"/>
         <MetricCard label="Mínimo" value={`${Math.min(...finished.map(u=>u.pct||0))}%`} color="#C62828"/>
       </div>
- 
+
       {/* Level dist */}
       <div style={{background:"#fff",borderRadius:16,border:"0.5px solid #E8E8E8",padding:"1.1rem 1.2rem",marginBottom:16}}>
         <div style={{fontSize:12,fontWeight:700,color:"#888",marginBottom:12}}>DISTRIBUCIÓN POR NIVEL</div>
@@ -341,7 +394,7 @@ function Report({data}){
           ))}
         </div>
       </div>
- 
+
       {/* Category */}
       <div style={{background:"#fff",borderRadius:16,border:"0.5px solid #E8E8E8",padding:"1.1rem 1.2rem",marginBottom:16}}>
         <div style={{fontSize:12,fontWeight:700,color:"#888",marginBottom:12}}>RENDIMIENTO POR ÁREA</div>
@@ -358,7 +411,7 @@ function Report({data}){
           );
         })}
       </div>
- 
+
       {/* Hard / Easy */}
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(260px,1fr))",gap:14,marginBottom:16}}>
         {[{title:"⚠ Preguntas más difíciles",qs:hardest,color:"#C62828"},{title:"✅ Mejor resultado",qs:easiest,color:"#2E7D32"}].map(({title,qs,color})=>(
@@ -374,7 +427,7 @@ function Report({data}){
           </div>
         ))}
       </div>
- 
+
       {/* Conclusions */}
       <div style={{background:"#0D1B2A",borderRadius:16,padding:"1.4rem"}}>
         <div style={{fontSize:12,fontWeight:700,color:"rgba(255,255,255,0.5)",marginBottom:14,letterSpacing:1}}>CONCLUSIONES PEDAGÓGICAS</div>
@@ -388,7 +441,7 @@ function Report({data}){
     </div>
   );
 }
- 
+
 /* ── STUDENT LIST (cards on mobile, table on desktop) ────────────────────── */
 function StudentCard({u,onView,onReset,onDelete}){
   const lv=u.finished?getLevel(u.pct||0):null;
@@ -427,26 +480,58 @@ function StudentCard({u,onView,onReset,onDelete}){
       )}
       <div style={{display:"flex",gap:8}}>
         <button onClick={()=>onView(u)} style={{flex:1,padding:"9px",borderRadius:9,border:"0.5px solid #E0E0E0",background:"#fff",fontSize:13,fontWeight:600,cursor:"pointer",color:"#1565C0"}}>👁 Ver</button>
-        <button onClick={()=>{if(window.confirm("¿Resetear prueba?"))onReset(u.key);}} style={{flex:1,padding:"9px",borderRadius:9,border:"0.5px solid #E0E0E0",background:"#fff",fontSize:13,fontWeight:600,cursor:"pointer",color:"#E65100"}}>↺ Resetear</button>
-        <button onClick={()=>{if(window.confirm("¿Eliminar registro?"))onDelete(u.key);}} style={{flex:1,padding:"9px",borderRadius:9,border:"0.5px solid #FFCDD2",background:"#FFF5F5",fontSize:13,fontWeight:600,cursor:"pointer",color:"#C62828"}}>🗑</button>
+        <button onClick={()=>{if(window.confirm("¿Resetear prueba?"))onReset(u);}} style={{flex:1,padding:"9px",borderRadius:9,border:"0.5px solid #E0E0E0",background:"#fff",fontSize:13,fontWeight:600,cursor:"pointer",color:"#E65100"}}>↺ Resetear</button>
+        <button onClick={()=>{if(window.confirm("¿Eliminar registro?"))onDelete(u);}} style={{flex:1,padding:"9px",borderRadius:9,border:"0.5px solid #FFCDD2",background:"#FFF5F5",fontSize:13,fontWeight:600,cursor:"pointer",color:"#C62828"}}>🗑</button>
       </div>
     </div>
   );
 }
- 
+
 /* ── MAIN DASHBOARD ──────────────────────────────────────────────────────── */
-function Dashboard({onLogout}){
-  const [data,setData]=useState([]);
+// adminPass viaja aquí (en memoria de React, nunca en localStorage) para
+// poder autorizar cada reset/delete/refresh subsiguiente sin pedirla otra vez
+// dentro de la misma sesión del panel.
+function Dashboard({adminPass,initialData,onLogout}){
+  const [data,setData]=useState(initialData);
   const [view,setView]=useState("students");
   const [search,setSearch]=useState("");
   const [filterStatus,setFilterStatus]=useState("all");
   const [sortBy,setSortBy]=useState("name");
   const [selected,setSelected]=useState(null);
   const [sideOpen,setSideOpen]=useState(false);
- 
-  const refresh=()=>setData(getData());
-  useEffect(()=>{refresh();},[]);
- 
+  const [refreshing,setRefreshing]=useState(false);
+  const [syncError,setSyncError]=useState("");
+
+  // Al montar: ya tenemos initialData (de la llamada que hizo login), pero
+  // lo guardamos en caché para la próxima vez que se abra el panel.
+  useEffect(()=>{ setCachedData(initialData); }, []); // eslint-disable-line
+
+  async function refresh(){
+    setRefreshing(true); setSyncError("");
+    const res = await callSheets({ action: "list", adminPass });
+    setRefreshing(false);
+    if(res.ok){
+      setData(res.students || []);
+      setCachedData(res.students || []);
+    } else {
+      setSyncError("No se pudo actualizar desde Sheets — mostrando el último dato guardado. " + (res.error||""));
+    }
+  }
+
+  async function handleReset(user){
+    setSyncError("");
+    const res = await callSheets({ action:"reset", adminPass, docType:user.docType, docNum:user.docNum });
+    if(res.ok){ await refresh(); }
+    else { setSyncError("No se pudo resetear: " + (res.error||"error desconocido")); }
+  }
+
+  async function handleDelete(user){
+    setSyncError("");
+    const res = await callSheets({ action:"delete", adminPass, docType:user.docType, docNum:user.docNum });
+    if(res.ok){ await refresh(); }
+    else { setSyncError("No se pudo eliminar: " + (res.error||"error desconocido")); }
+  }
+
   const filtered=data
     .filter(u=>{
       const q=search.toLowerCase();
@@ -460,19 +545,19 @@ function Dashboard({onLogout}){
       if(sortBy==="date")return(b.finishedAt||0)-(a.finishedAt||0);
       return 0;
     });
- 
+
   const finished=data.filter(u=>u.finished);
   const inProgress=data.filter(u=>u.started&&!u.finished);
   const avg=finished.length?Math.round(finished.reduce((s,u)=>s+(u.pct||0),0)/finished.length):0;
- 
+
   const navItems=[
     {id:"students",label:"Estudiantes",icon:"👥"},
     {id:"report",label:"Reporte",icon:"📊"},
   ];
- 
+
   return(
     <div style={{minHeight:"100vh",background:"#F4F6F9",...F,display:"flex",flexDirection:"column"}}>
- 
+
       {/* ── TOP BAR (mobile) ─── */}
       <div style={{background:"#0D1B2A",padding:"0 1rem",height:56,display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0}}>
         <div style={{display:"flex",alignItems:"center",gap:10}}>
@@ -490,15 +575,19 @@ function Dashboard({onLogout}){
             style={{background:"rgba(255,255,255,0.1)",border:"none",color:"#fff",padding:"6px 10px",borderRadius:8,fontSize:11,cursor:"pointer",fontWeight:600,whiteSpace:"nowrap"}}>
             ↓ CSV
           </button>
-          <button onClick={refresh}
-            style={{background:"rgba(255,255,255,0.1)",border:"none",color:"rgba(255,255,255,0.7)",width:34,height:34,borderRadius:8,cursor:"pointer",fontSize:16,display:"flex",alignItems:"center",justifyContent:"center"}}>
-            ↻
+          <button onClick={refresh} disabled={refreshing}
+            style={{background:"rgba(255,255,255,0.1)",border:"none",color:"rgba(255,255,255,0.7)",width:34,height:34,borderRadius:8,cursor:refreshing?"default":"pointer",fontSize:16,display:"flex",alignItems:"center",justifyContent:"center",opacity:refreshing?0.5:1}}>
+            {refreshing?"⏳":"↻"}
           </button>
         </div>
       </div>
- 
+
+      {syncError&&(
+        <div style={{background:"#FFF3E0",color:"#E65100",padding:"8px 16px",fontSize:12,flexShrink:0}}>⚠ {syncError}</div>
+      )}
+
       <div style={{display:"flex",flex:1,minHeight:0}}>
- 
+
         {/* ── SIDEBAR ─── */}
         {sideOpen&&(
           <div style={{position:"fixed",inset:0,zIndex:200,background:"rgba(0,0,0,0.4)"}} onClick={()=>setSideOpen(false)}>
@@ -523,10 +612,10 @@ function Dashboard({onLogout}){
             </div>
           </div>
         )}
- 
+
         {/* ── MAIN CONTENT ─── */}
         <div style={{flex:1,display:"flex",flexDirection:"column",minWidth:0,overflow:"auto"}}>
- 
+
           {/* Tab nav (always visible below top bar) */}
           <div style={{background:"#fff",borderBottom:"0.5px solid #E8E8E8",display:"flex",padding:"0 1rem",flexShrink:0}}>
             {navItems.map(t=>(
@@ -538,7 +627,7 @@ function Dashboard({onLogout}){
               </button>
             ))}
           </div>
- 
+
           {/* KPI strip */}
           <div style={{padding:"1rem",display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(110px,1fr))",gap:8,flexShrink:0}}>
             <MetricCard label="Registrados" value={data.length}/>
@@ -546,7 +635,7 @@ function Dashboard({onLogout}){
             <MetricCard label="En progreso" value={inProgress.length} color="#E65100"/>
             <MetricCard label="Promedio" value={finished.length?`${avg}%`:"—"} color="#1565C0" sub={finished.length?getLevel(avg).label:""}/>
           </div>
- 
+
           {/* Page content */}
           <div style={{flex:1,padding:"0 1rem 1.5rem"}}>
             {view==="students"&&(
@@ -573,7 +662,7 @@ function Dashboard({onLogout}){
                   </div>
                   <div style={{fontSize:12,color:"#aaa"}}>{filtered.length} resultado{filtered.length!==1?"s":""}</div>
                 </div>
- 
+
                 {/* Student cards */}
                 {filtered.length===0&&(
                   <div style={{textAlign:"center",padding:"3rem 1rem",color:"#bbb"}}>
@@ -584,8 +673,8 @@ function Dashboard({onLogout}){
                 {filtered.map(u=>(
                   <StudentCard key={u.key} u={u}
                     onView={setSelected}
-                    onReset={key=>{resetExam(key);refresh();}}
-                    onDelete={key=>{deleteUser(key);refresh();}}/>
+                    onReset={handleReset}
+                    onDelete={handleDelete}/>
                 ))}
               </>
             )}
@@ -593,21 +682,23 @@ function Dashboard({onLogout}){
           </div>
         </div>
       </div>
- 
+
       {/* Student detail drawer */}
       {selected&&(
         <StudentDetail
           user={selected}
           onClose={()=>setSelected(null)}
-          onReset={()=>{resetExam(selected.key);refresh();setSelected(null);}}
-          onDelete={()=>{deleteUser(selected.key);refresh();setSelected(null);}}/>
+          onReset={()=>{handleReset(selected);setSelected(null);}}
+          onDelete={()=>{handleDelete(selected);setSelected(null);}}/>
       )}
     </div>
   );
 }
- 
+
 /* ── ROOT ────────────────────────────────────────────────────────────────── */
 export default function Admin(){
-  const [auth,setAuth]=useState(false);
-  return auth?<Dashboard onLogout={()=>setAuth(false)}/>:<AdminLogin onLogin={()=>setAuth(true)}/>;
+  const [auth,setAuth]=useState(null); // null = no autenticado; { pass, students } una vez logueado
+
+  if(auth) return <Dashboard adminPass={auth.pass} initialData={auth.students} onLogout={()=>setAuth(null)}/>;
+  return <AdminLogin onLogin={(pass,students)=>setAuth({pass,students})}/>;
 }
